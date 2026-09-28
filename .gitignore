@@ -1,0 +1,18 @@
+# Build output
+/build*/
+*.o
+*.d
+*.elf
+*.self
+*.pkg
+EBOOT.BIN
+PARAM.SFO
+
+# Game data (never commit)
+*.pk3
+
+# Editors / OS
+*~
+*.swp
+.DS_Store
+Thumbs.db

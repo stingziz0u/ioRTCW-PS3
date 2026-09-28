@@ -1,0 +1,70 @@
+# CLAUDE.md — ioRTWC-PS3
+
+Port de **iortcw** (Return to Castle Wolfenstein, **solo single player**) a
+PS3 homebrew con PSL1GHT. Base de la capa de plataforma: **IoQuake3-PS3**
+(`github.com/Mayo1970/IoQuake3-PS3`, GPLv2+), que corre Quake 3 en hardware
+con su capa GL→RSX. El motor es iortcw SP (`github.com/iortcw/iortcw`,
+carpeta `SP/`, GPLv3 + términos adicionales de id).
+
+## Reglas de trabajo
+
+- **Comunicación en español**, informal, iteración rápida; correcciones
+  cortas antes que explicaciones largas.
+- **División del trabajo**: el coding lo hace Claude; el debugging y el testeo
+  en hardware real los hace el dueño del repo. **Nada de RPCS3.** Siempre pasar
+  **comandos concretos y en orden**, listos para copiar, nunca "fijate si…".
+- **No correr tests largos por él.** Claude puede compilar y linkear para
+  verificar (toolchain en la sesión), pero no "probar el juego". Los crashes se
+  investigan **leyendo el código**, no reproduciendo.
+- **Entorno del dueño**: WSL Ubuntu sobre Windows 11, PS3 Super Slim con HEN +
+  webMAN. Instalación de PKG y transferencia de datos **por FTP, siempre**.
+- **Ruta del proyecto en WSL: `~/ioRTWC-PS3`.** Todos los comandos empiezan con
+  `cd ~/ioRTWC-PS3`. Nunca asumir en qué carpeta está parado.
+- Descargas desde el chat llegan a `/mnt/c/Users/Ren/Downloads/`. Los comandos
+  leen los archivos **directo de Descargas**. Windows renombra los repetidos
+  (`archivo (1).patch`): **cada archivo reenviado lleva un nombre nuevo**
+  (numerados: `iortcw-ps3-1.patch`, `-2`, …).
+- **Nada se sube al repo hasta tener una 1.0 probada en consola.** Ni push (ni
+  a ramas `claude/…`), ni tags, ni releases. El stop hook que pide push se
+  contesta en una línea: pendiente de la prueba en consola. Cuando la 1.0 anda,
+  se sube todo y **el dueño crea la release** con el PKG desde la web.
+- **Commits**: sin la línea `Claude-Session:` ni links de sesión; nunca
+  identificadores de modelo en commits, README o código. El email público del
+  dueño es `323042592+stingziz0u@users.noreply.github.com` (no editar archivos
+  desde la web de GitHub: firma con el email real).
+- **Compilar solo lo que hace falta para la prueba.**
+- **PKG que prepara todo**: el PKG crea las carpetas que el usuario tiene que
+  llenar (`main/`), **vacías, sin `.txt` de relleno**. Logs siempre dentro del
+  USRDIR del juego.
+- **Video**: resolución interna elegible, escalada a 720p por el RSX, con
+  opción 16:9 en el menú de video (patrón "Video Settings").
+- **Todo cambio a archivos de upstream va entre `#ifdef __PS3__`**; los archivos
+  `ps3_*` y `code/{gl,audio,input,renderer}/` son propios del port.
+
+## Datos del proyecto
+
+| | |
+|---|---|
+| Título en el XMB | `Return to Castle Wolfenstein` |
+| APPID / TITLE_ID | `IORTCWPS3` (9 caracteres, obligatorio) |
+| Ícono | `ICON0.PNG` (320×176 RGBA) |
+| Datos del usuario | versión Steam 1.41: `pak0.pk3`, `sp_pak1.pk3`, `sp_pak2.pk3`, `sp_pak3.pk3` en `USRDIR/main/` |
+| Toolchain del dueño | `ppu-gcc` 7.2.0 (ps3toolchain), `/usr/local/ps3dev` |
+
+## Restricciones heredadas de IoQuake3-PS3 (no romper)
+
+- **TOC única de 64 KB**: `ppu-gcc` 7.2 no tiene `-mcmodel`. Linkear con
+  `-Wl,--no-multi-toc` (nunca sacarlo). Si se pasa, `-mminimal-toc` en los
+  objetos pesados. Verificar después de cada link:
+  `ppu-nm <elf> | grep -c r2off` = 0 y `.got` < 0x10000.
+- **Memoria**: ~145 MB libres al arrancar (de ~213 MB del proceso se van el
+  buffer IO del RSX y los segmentos del EBOOT). lv2 **se cuelga** en vez de
+  devolver NULL cuando un malloc grande no entra. El mínimo de hunk de iortcw
+  SP (128 MB) no entra: hay que medir por mapa.
+- **Sin JIT ni carga de DLL**: qagame, cgame y ui van linkeados estáticos,
+  cada uno con `ld -r` + `objcopy` dejando globales solo sus entradas.
+- `-O2` global (`-O3` rompe el arranque), `-mno-altivec` global.
+- `-lrt -llv2` en el link, `SYS_PROCESS_PARAM`, callback de sysutil, todos los
+  caminos de salida con shutdown.
+- No hay `/tmp`, `chdir` ni rutas relativas en PS3: todo absoluto bajo
+  `/dev_hdd0/game/IORTCWPS3/USRDIR/`.

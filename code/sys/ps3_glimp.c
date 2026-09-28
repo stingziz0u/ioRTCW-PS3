@@ -41,6 +41,7 @@ const void *ps3_rsx_io_base = NULL;
 size_t      ps3_rsx_io_size = 0;
 
 static int ps3_rsx_up = 0;
+static int ps3_fit_border = 0;
 
 static volatile u32 ps3_flip_queued    = 0;
 static volatile u32 ps3_flip_completed = 0;
@@ -309,6 +310,9 @@ void PS3_RSX_BeginFrame(void)
 
     PS3_RSX_SetRenderTarget(ps3_current_fb);
     ps3gl_begin_frame();
+    /* triple buffering: every buffer needs its screen-fit border cleared */
+    if (ps3_fit_border)
+        ps3gl_clear_full_surface();
 }
 
 void PS3_RSX_EndFrame(void)
@@ -338,9 +342,26 @@ void GLimp_Init(qboolean fixedFunction)
 
     QGL_Init();
 
-    glConfig.vidWidth           = ps3_display_width;
-    glConfig.vidHeight          = ps3_display_height;
-    glConfig.windowAspect       = (float)ps3_display_width / (float)ps3_display_height;
+    /* Screen fit (TV overscan): the engine renders to a centered rect of
+     * vid_ps3_screenfit percent of the output; the border stays black. */
+    {
+        cvar_t *fit = ri.Cvar_Get("vid_ps3_screenfit", PS3_DEFAULT_SCREENFIT, CVAR_ARCHIVE | CVAR_LATCH);
+        int pct = fit->integer;
+        int w, h;
+
+        if (pct < 70) pct = 70;
+        if (pct > 100) pct = 100;
+        w = ((int)ps3_display_width * pct / 100) & ~1;
+        h = ((int)ps3_display_height * pct / 100) & ~1;
+        ps3gl_set_fit(((int)ps3_display_width - w) / 2, ((int)ps3_display_height - h) / 2, w, h);
+        ps3_fit_border = (pct < 100);
+
+        glConfig.vidWidth  = w;
+        glConfig.vidHeight = h;
+        PS3_Logf("GLimp_Init: output %ux%u, screen fit %d%% -> %dx%d",
+                 ps3_display_width, ps3_display_height, pct, w, h);
+    }
+    glConfig.windowAspect       = (float)glConfig.vidWidth / (float)glConfig.vidHeight;
     glConfig.colorBits          = 32;
     glConfig.depthBits          = 24;
     glConfig.stencilBits        = 8;
@@ -372,8 +393,6 @@ void GLimp_Init(qboolean fixedFunction)
                sizeof(glConfig.extensions_string));
 
     ri.Cvar_Get("r_availableModes", "", CVAR_ROM);
-
-    PS3_Logf("GLimp_Init: %dx%d", glConfig.vidWidth, glConfig.vidHeight);
 
     ri.IN_Init(NULL);
 }

@@ -2905,12 +2905,66 @@ void Item_Action( itemDef_t *item ) {
 	}
 }
 
+#ifdef __PS3__
+/*
+=================
+Item_PadFocusPoint / Item_PadFocusable
+
+Pad navigation (PS3). A text item only takes the focus while the cursor is on
+its text (Item_SetFocus), so moving the focus with the d-pad has to aim at the
+item itself; the cursor is then warped there so focus and pointer agree.
+=================
+*/
+static void Item_PadFocusPoint( itemDef_t *item, float *x, float *y ) {
+	if ( item->type == ITEM_TYPE_TEXT && item->textRect.w > 0 ) {
+		// Item_SetFocus tests textRect with y moved up by its height
+		*x = item->textRect.x + item->textRect.w * 0.5f;
+		*y = item->textRect.y - item->textRect.h * 0.5f;
+	} else {
+		*x = item->window.rect.x + item->window.rect.w * 0.5f;
+		*y = item->window.rect.y + item->window.rect.h * 0.5f;
+	}
+}
+
+static qboolean Item_PadFocusable( itemDef_t *item ) {
+	if ( !item || item->window.flags & WINDOW_DECORATION || !( item->window.flags & WINDOW_VISIBLE ) ) {
+		return qfalse;
+	}
+	if ( item->cvarFlags & ( CVAR_ENABLE | CVAR_DISABLE ) && !Item_EnableShowViaCvar( item, CVAR_ENABLE ) ) {
+		return qfalse;
+	}
+	if ( item->cvarFlags & ( CVAR_SHOW | CVAR_HIDE ) && !Item_EnableShowViaCvar( item, CVAR_SHOW ) ) {
+		return qfalse;
+	}
+	return ( item->action || item->type != ITEM_TYPE_TEXT ) ? qtrue : qfalse;
+}
+
+static qboolean Menu_PadFocusItem( menuDef_t *menu, int index ) {
+	itemDef_t *item = menu->items[index];
+	float x, y;
+
+	Item_PadFocusPoint( item, &x, &y );
+	if ( Item_SetFocus( item, x, y ) ) {
+		DC->cursorx = (int)x;
+		DC->cursory = (int)y;
+		Menu_HandleMouseMove( menu, x, y );
+		return qtrue;
+	}
+	return qfalse;
+}
+#endif
+
 itemDef_t *Menu_SetPrevCursorItem( menuDef_t *menu ) {
 	qboolean wrapped = qfalse;
 	int oldCursor = menu->cursorItem;
 
 	if ( menu->cursorItem < 0 ) {
+#ifdef __PS3__
+		// the -- below then starts at the last item (upstream skipped it)
+		menu->cursorItem = menu->itemCount;
+#else
 		menu->cursorItem = menu->itemCount - 1;
+#endif
 		wrapped = qtrue;
 	}
 
@@ -2922,10 +2976,18 @@ itemDef_t *Menu_SetPrevCursorItem( menuDef_t *menu ) {
 			menu->cursorItem = menu->itemCount - 1;
 		}
 
+#ifdef __PS3__
+		if ( menu->cursorItem >= 0 && menu->cursorItem < menu->itemCount &&
+			 Item_PadFocusable( menu->items[menu->cursorItem] ) &&
+			 Menu_PadFocusItem( menu, menu->cursorItem ) ) {
+			return menu->items[menu->cursorItem];
+		}
+#else
 		if ( Item_SetFocus( menu->items[menu->cursorItem], DC->cursorx, DC->cursory ) ) {
 			Menu_HandleMouseMove( menu, menu->items[menu->cursorItem]->window.rect.x + 1, menu->items[menu->cursorItem]->window.rect.y + 1 );
 			return menu->items[menu->cursorItem];
 		}
+#endif
 	}
 	menu->cursorItem = oldCursor;
 	return NULL;
@@ -2939,7 +3001,11 @@ itemDef_t *Menu_SetNextCursorItem( menuDef_t *menu ) {
 
 
 	if ( menu->cursorItem == -1 ) {
+#ifdef __PS3__
+		// stay at -1 so the ++ below starts at item 0 (upstream skipped it)
+#else
 		menu->cursorItem = 0;
+#endif
 		wrapped = qtrue;
 	}
 
@@ -2951,14 +3017,28 @@ itemDef_t *Menu_SetNextCursorItem( menuDef_t *menu ) {
 				wrapped = qtrue;
 				menu->cursorItem = 0;
 			} else {
+#ifdef __PS3__
+				// nothing focusable: never index items[-1]
+				menu->cursorItem = oldCursor;
+				return ( oldCursor >= 0 ) ? menu->items[oldCursor] : NULL;
+#else
 				return menu->items[oldCursor];
+#endif
 			}
 		}
 
+#ifdef __PS3__
+		if ( menu->cursorItem >= 0 && menu->cursorItem < menu->itemCount &&
+			 Item_PadFocusable( menu->items[menu->cursorItem] ) &&
+			 Menu_PadFocusItem( menu, menu->cursorItem ) ) {
+			return menu->items[menu->cursorItem];
+		}
+#else
 		if ( Item_SetFocus( menu->items[menu->cursorItem], DC->cursorx, DC->cursory ) ) {
 			Menu_HandleMouseMove( menu, menu->items[menu->cursorItem]->window.rect.x + 1, menu->items[menu->cursorItem]->window.rect.y + 1 );
 			return menu->items[menu->cursorItem];
 		}
+#endif
 	}
 
 	menu->cursorItem = oldCursor;
@@ -3250,6 +3330,24 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 				Item_Action( item );
 			}
 		}
+#ifdef __PS3__
+		else if ( key == K_ENTER ) {
+			// pad confirm with nothing focused: focus the first item; if it is
+			// the only one (the briefing's "continue"), activate it right away
+			int focusable = 0;
+
+			for ( i = 0; i < menu->itemCount; i++ ) {
+				if ( Item_PadFocusable( menu->items[i] ) ) {
+					focusable++;
+				}
+			}
+			menu->cursorItem = -1;
+			item = Menu_SetNextCursorItem( menu );
+			if ( item && focusable == 1 ) {
+				Item_Action( item );
+			}
+		}
+#endif
 		break;
 	}
 }

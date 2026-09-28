@@ -73,6 +73,10 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
     ps3_log(dbg);
     ps3gl.screen_w = w;
     ps3gl.screen_h = h;
+    ps3gl.fit_x = 0;
+    ps3gl.fit_y = 0;
+    ps3gl.fit_w = (int)w;
+    ps3gl.fit_h = (int)h;
     ps3gl.dirty    = PS3GL_DIRTY_ALL;
 
     ps3gl.imm.color = ps3gl_pack_color(1.0f, 1.0f, 1.0f, 1.0f);

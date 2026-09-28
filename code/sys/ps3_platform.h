@@ -92,6 +92,9 @@ static inline int mprotect(void *addr, size_t len, int prot) {
  * 1536 sndBuffers of 2064 bytes on this ABI: 6 -> 18.1 MB. */
 #define PS3_MAX_COMSOUNDMEGS 6
 
+/* Default screen fit (percent of the TV picture used): TVs crop the edges. */
+#define PS3_DEFAULT_SCREENFIT "88"
+
 #define USE_INTERNAL_SDL_HEADERS
 
 /* PSL1GHT's COLOR_* macros collide with the engine's console color constants. */

@@ -168,11 +168,11 @@ void ps3gl_FrontFace(GLenum mode)
 
 void ps3gl_Scissor(GLint x, GLint y, GLsizei w, GLsizei h)
 {
-    /* Same GL→RSX Y conversion as ps3gl_Viewport. */
-    int rsx_y = (int)ps3gl.screen_h - y - (int)h;
+    /* Same GL→RSX Y conversion as ps3gl_Viewport, inside the fit rect. */
+    int rsx_y = ps3gl.fit_h - y - (int)h;
 
-    ps3gl.rs.scissor_x = (int16_t)x;
-    ps3gl.rs.scissor_y = (int16_t)rsx_y;
+    ps3gl.rs.scissor_x = (int16_t)(x + ps3gl.fit_x);
+    ps3gl.rs.scissor_y = (int16_t)(rsx_y + ps3gl.fit_y);
     ps3gl.rs.scissor_w = (uint16_t)w;
     ps3gl.rs.scissor_h = (uint16_t)h;
     ps3gl.dirty |= PS3GL_DIRTY_SCISSOR;
@@ -182,10 +182,11 @@ void ps3gl_Viewport(GLint x, GLint y, GLsizei w, GLsizei h)
 {
     /* ioq3 viewport Y is GL-convention (Y=0 at bottom); RSX framebuffer has Y=0 at top --
      * convert with rsx_y = screen_h - gl_y - h. No-op for full-screen viewports (y=0, h=screen_h). */
-    int rsx_y = (int)ps3gl.screen_h - y - (int)h;
+    int rsx_y = ps3gl.fit_h - y - (int)h;
 
-    ps3gl.rs.vp_x = (int16_t)x;
-    ps3gl.rs.vp_y = (int16_t)rsx_y;
+    /* screen fit: the engine's screen is the fit rect of the surface */
+    ps3gl.rs.vp_x = (int16_t)(x + ps3gl.fit_x);
+    ps3gl.rs.vp_y = (int16_t)(rsx_y + ps3gl.fit_y);
     ps3gl.rs.vp_w = (uint16_t)w;
     ps3gl.rs.vp_h = (uint16_t)h;
     ps3gl.dirty |= PS3GL_DIRTY_VIEWPORT;
@@ -294,6 +295,38 @@ void ps3gl_Clear(GLbitfield mask)
         rsxClearSurface(ctx, gcm_mask);
 }
 
+void ps3gl_set_fit(int x, int y, int w, int h)
+{
+    ps3gl.fit_x = x;
+    ps3gl.fit_y = y;
+    ps3gl.fit_w = w;
+    ps3gl.fit_h = h;
+    ps3gl.dirty |= PS3GL_DIRTY_VIEWPORT | PS3GL_DIRTY_SCISSOR;
+}
+
+/* Black out the whole surface (the screen-fit border included). The RSX
+ * clear honors the scissor and the viewport, so both are opened to the full
+ * surface first and marked dirty for the next draw. */
+void ps3gl_clear_full_surface(void)
+{
+    gcmContextData *ctx = ps3gl_get_ctx();
+    float scale[4], offset[4];
+
+    if (!ctx) return;
+    scale[0] = ps3gl.screen_w * 0.5f;  scale[1] = ps3gl.screen_h * -0.5f;
+    scale[2] = 0.5f;                   scale[3] = 0.0f;
+    offset[0] = ps3gl.screen_w * 0.5f; offset[1] = ps3gl.screen_h * 0.5f;
+    offset[2] = 0.5f;                  offset[3] = 0.0f;
+    rsxSetViewport(ctx, 0, 0, ps3gl.screen_w, ps3gl.screen_h, 0.0f, 1.0f, scale, offset);
+    rsxSetScissor(ctx, 0, 0, ps3gl.screen_w, ps3gl.screen_h);
+    rsxSetColorMask(ctx, GCM_COLOR_MASK_R | GCM_COLOR_MASK_G | GCM_COLOR_MASK_B | GCM_COLOR_MASK_A);
+    rsxSetClearColor(ctx, 0xff000000);
+    rsxSetClearDepthStencil(ctx, 0xffffff00);
+    rsxClearSurface(ctx, GCM_CLEAR_R | GCM_CLEAR_G | GCM_CLEAR_B | GCM_CLEAR_A |
+                         GCM_CLEAR_Z | GCM_CLEAR_S);
+    ps3gl.dirty |= PS3GL_DIRTY_VIEWPORT | PS3GL_DIRTY_SCISSOR | PS3GL_DIRTY_COLORMASK;
+}
+
 /* Query */
 
 void ps3gl_GetIntegerv(GLenum pname, GLint *params)
@@ -396,18 +429,22 @@ void ps3gl_apply_states(void)
             int sy = ps3gl.rs.scissor_y;
             int sw = ps3gl.rs.scissor_w;
             int sh = ps3gl.rs.scissor_h;
-            if (sx < 0) { sw += sx; sx = 0; }
-            if (sy < 0) { sh += sy; sy = 0; }
+            int fx0 = ps3gl.fit_x, fy0 = ps3gl.fit_y;
+            int fx1 = ps3gl.fit_x + ps3gl.fit_w, fy1 = ps3gl.fit_y + ps3gl.fit_h;
+            if (sx < fx0) { sw -= fx0 - sx; sx = fx0; }
+            if (sy < fy0) { sh -= fy0 - sy; sy = fy0; }
             if (sw < 1) sw = 1;
             if (sh < 1) sh = 1;
-            if (sx + sw > (int)ps3gl.screen_w) sw = (int)ps3gl.screen_w - sx;
-            if (sy + sh > (int)ps3gl.screen_h) sh = (int)ps3gl.screen_h - sy;
+            if (sx + sw > fx1) sw = fx1 - sx;
+            if (sy + sh > fy1) sh = fy1 - sy;
             if (sw < 1) sw = 1;
             if (sh < 1) sh = 1;
             rsxSetScissor(ctx, (uint16_t)sx, (uint16_t)sy,
                           (uint16_t)sw, (uint16_t)sh);
         } else {
-            rsxSetScissor(ctx, 0, 0, ps3gl.screen_w, ps3gl.screen_h);
+            /* nothing is ever drawn outside the fit rect */
+            rsxSetScissor(ctx, (uint16_t)ps3gl.fit_x, (uint16_t)ps3gl.fit_y,
+                          (uint16_t)ps3gl.fit_w, (uint16_t)ps3gl.fit_h);
         }
     }
 

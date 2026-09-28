@@ -141,6 +141,10 @@ typedef struct {
     uint32_t            screen_w;
     uint32_t            screen_h;
 
+    /* Screen fit (overscan): the engine renders into this rect of the
+     * surface and sees fit_w x fit_h as its screen. Full surface by default. */
+    int                 fit_x, fit_y, fit_w, fit_h;
+
     uint32_t            dirty;
 
     struct {
@@ -225,6 +229,8 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h);
 void ps3gl_shutdown(void);
 void ps3gl_begin_frame(void);
 void ps3gl_end_frame(void);
+void ps3gl_set_fit(int x, int y, int w, int h);
+void ps3gl_clear_full_surface(void);
 
 /* Subsystem init */
 void ps3gl_states_init(void);

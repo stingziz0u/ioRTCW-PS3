@@ -100,8 +100,21 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
 - GL: `qgl_ps3.c` pone un stub que loguea "not implemented" en cada entrada
   GL y encima conecta las de ps3gl. Si falta algo, sale en el log.
 - Pad (`ps3_input.c`): en juego todo es tecla bindeable (`K_JOY1..15`); en
-  menús/consola X = Enter, O = Escape, cruceta = flechas, stick izq. = cursor.
-  SELECT solo = notebook (al soltar); SELECT+TRIÁNGULO = consola.
+  menús/consola X = Enter, O = Escape, cruceta **y stick izq.** = flechas con
+  auto-repeat, stick der. = puntero con aceleración. SELECT solo = notebook
+  (al soltar); SELECT+TRIÁNGULO = consola.
+- Menús con pad (`ui/ui_shared.c`, `#ifdef __PS3__`): un ítem de texto solo
+  toma el foco con el cursor encima, así que la navegación apunta al centro
+  del ítem y **mueve el cursor ahí** (foco y puntero no se separan). X sin
+  foco enfoca el primer ítem, y si es el único del menú (el "continuar" del
+  briefing después de cargar) lo activa. Arreglados dos bugs de upstream en
+  `Menu_SetNext/PrevCursorItem` (saltaban el primer/último ítem y podían
+  leer `items[-1]`).
+- **Screen fit** (overscan): cvar `vid_ps3_screenfit` (70–100, default 88,
+  latched: aplica en el próximo arranque o `vid_restart`). El motor ve un
+  rect centrado de ese % del 1280×720 (`ps3gl_set_fit`: viewport y scissor
+  desplazados); el borde se limpia a negro en cada frame. Va a ir al menú
+  Video Settings.
 
 ## Restricciones heredadas de IoQuake3-PS3 (no romper)
 

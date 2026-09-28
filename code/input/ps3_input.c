@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <io/pad.h>
 #include <io/kb.h>
 #include <io/mouse.h>
@@ -318,7 +319,6 @@ static void Mouse_Frame(qboolean syncOnly)
 #define STICK_CENTER       128
 #define STICK_DEADZONE     30
 #define STICK_RANGE        (128 - STICK_DEADZONE)
-#define MENU_CURSOR_SPEED  5.0f
 #define TRIGGER_THRESHOLD  30
 
 enum {
@@ -326,6 +326,8 @@ enum {
     PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3,
     PB_START, PB_SELECT,
     PB_UP, PB_DOWN, PB_LEFT, PB_RIGHT,
+    /* left stick as a d-pad: only produces keys in menus */
+    PB_LS_UP, PB_LS_DOWN, PB_LS_LEFT, PB_LS_RIGHT,
     PB_COUNT
 };
 
@@ -336,7 +338,17 @@ static const int pad_game_key[PB_COUNT] = {
     K_JOY9, K_JOY10,                     /* L3 R3 */
     K_ESCAPE, K_JOY11,                   /* start select */
     K_JOY12, K_JOY13, K_JOY14, K_JOY15,  /* d-pad */
+    0, 0, 0, 0,                          /* left stick directions: nothing in game */
 };
+
+/* Menu navigation auto-repeat for held arrows (d-pad / left stick). */
+#define PAD_REPEAT_DELAY   380
+#define PAD_REPEAT_RATE    110
+/* Left stick as d-pad, with hysteresis so it does not chatter. */
+#define LS_PRESS           72
+#define LS_RELEASE         40
+/* Right stick pointer (menu units per frame at full tilt). */
+#define POINTER_MAX_SPEED  9.0f
 
 static padInfo  ps3_pad_info;
 static padData  ps3_pad_data;
@@ -346,6 +358,7 @@ static int      pad_sent[PB_COUNT];      /* key sent for the press, released wit
 static int      ps3_axis_prev[4];
 static float    ps3_cursor_accum_x, ps3_cursor_accum_y;
 static int      select_combo;
+static int      pad_repeat_at[PB_COUNT]; /* next auto-repeat time, 0 = none */
 
 static void PS3_SetDefaultBind(int keynum, const char *binding)
 {
@@ -373,6 +386,18 @@ static void read_buttons(const padData *pd, int out[PB_COUNT])
     out[PB_DOWN]     = pd->BTN_DOWN;
     out[PB_LEFT]     = pd->BTN_LEFT;
     out[PB_RIGHT]    = pd->BTN_RIGHT;
+
+    /* left stick directions, dominant axis only, with hysteresis */
+    {
+        int lx = (int)pd->ANA_L_H - STICK_CENTER;
+        int ly = (int)pd->ANA_L_V - STICK_CENTER;
+        int horiz = abs(lx) > abs(ly);
+
+        out[PB_LS_UP]    = (!horiz && ly < -(pad_down[PB_LS_UP]    ? LS_RELEASE : LS_PRESS)) ? 1 : 0;
+        out[PB_LS_DOWN]  = (!horiz && ly >  (pad_down[PB_LS_DOWN]  ? LS_RELEASE : LS_PRESS)) ? 1 : 0;
+        out[PB_LS_LEFT]  = ( horiz && lx < -(pad_down[PB_LS_LEFT]  ? LS_RELEASE : LS_PRESS)) ? 1 : 0;
+        out[PB_LS_RIGHT] = ( horiz && lx >  (pad_down[PB_LS_RIGHT] ? LS_RELEASE : LS_PRESS)) ? 1 : 0;
+    }
 }
 
 /* Key for a new press, depending on who has the input. Menus and the console
@@ -385,10 +410,10 @@ static int pad_key_for(int b, int catchers)
         switch (b) {
         case PB_CROSS:  return K_ENTER;
         case PB_CIRCLE: return K_ESCAPE;
-        case PB_UP:     return K_UPARROW;
-        case PB_DOWN:   return K_DOWNARROW;
-        case PB_LEFT:   return K_LEFTARROW;
-        case PB_RIGHT:  return K_RIGHTARROW;
+        case PB_UP:     case PB_LS_UP:    return K_UPARROW;
+        case PB_DOWN:   case PB_LS_DOWN:  return K_DOWNARROW;
+        case PB_LEFT:   case PB_LS_LEFT:  return K_LEFTARROW;
+        case PB_RIGHT:  case PB_LS_RIGHT: return K_RIGHTARROW;
         case PB_L1:     return K_PGUP;      /* console scrollback */
         case PB_R1:     return K_PGDN;
         default: break;
@@ -406,6 +431,7 @@ static void pad_release_all(void)
             Com_QueueEvent(0, SE_KEY, pad_sent[b], qfalse, 0, NULL);
         pad_down[b] = 0;
         pad_sent[b] = 0;
+        pad_repeat_at[b] = 0;
     }
     for (b = 0; b < 4; b++) {
         if (ps3_axis_prev[b])
@@ -506,11 +532,30 @@ void PS3_Input_Frame(void)
             /* the key is picked at press time and released as the same key,
              * so a menu closing mid-press never leaves a key stuck down */
             pad_sent[b] = pad_key_for(b, catchers);
-            Com_QueueEvent(0, SE_KEY, pad_sent[b], qtrue, 0, NULL);
+            if (pad_sent[b])
+                Com_QueueEvent(0, SE_KEY, pad_sent[b], qtrue, 0, NULL);
+            pad_repeat_at[b] = 0;
+            if (pad_sent[b] == K_UPARROW || pad_sent[b] == K_DOWNARROW ||
+                pad_sent[b] == K_LEFTARROW || pad_sent[b] == K_RIGHTARROW)
+                pad_repeat_at[b] = Sys_Milliseconds() + PAD_REPEAT_DELAY;
         } else if (pad_sent[b]) {
             Com_QueueEvent(0, SE_KEY, pad_sent[b], qfalse, 0, NULL);
+            pad_sent[b] = 0;
+            pad_repeat_at[b] = 0;
         }
         pad_down[b] = cur[b];
+    }
+
+    /* held arrows repeat, like a keyboard */
+    {
+        int now = Sys_Milliseconds();
+
+        for (b = 0; b < PB_COUNT; b++) {
+            if (pad_down[b] && pad_repeat_at[b] && now >= pad_repeat_at[b]) {
+                Com_QueueEvent(0, SE_KEY, pad_sent[b], qtrue, 0, NULL);
+                pad_repeat_at[b] = now + PAD_REPEAT_RATE;
+            }
+        }
     }
 
     {
@@ -526,19 +571,23 @@ void PS3_Input_Frame(void)
         if (abs(ry) < STICK_DEADZONE) ry = 0;
 
         if (in_menu) {
-            /* left stick drives the menu cursor */
-            if (lx || ly) {
-                float fx = (float)lx / (float)STICK_RANGE;
-                float fy = (float)ly / (float)STICK_RANGE;
+            /* the left stick navigates like the d-pad (see read_buttons);
+             * the right stick is a pointer for screens that need one */
+            if (rx || ry) {
+                float fx = (float)(rx > 0 ? rx - STICK_DEADZONE : rx + STICK_DEADZONE) / (float)STICK_RANGE;
+                float fy = (float)(ry > 0 ? ry - STICK_DEADZONE : ry + STICK_DEADZONE) / (float)STICK_RANGE;
                 int dx, dy;
 
+                if (!rx) fx = 0.0f;
+                if (!ry) fy = 0.0f;
                 if (fx > 1.0f) fx = 1.0f;
                 if (fx < -1.0f) fx = -1.0f;
                 if (fy > 1.0f) fy = 1.0f;
                 if (fy < -1.0f) fy = -1.0f;
-                /* linear: a squared curve underflows the accumulator */
-                ps3_cursor_accum_x += fx * MENU_CURSOR_SPEED;
-                ps3_cursor_accum_y += fy * MENU_CURSOR_SPEED;
+                /* precise near the center, fast at full tilt; the float
+                 * accumulator keeps slow movement from rounding to zero */
+                ps3_cursor_accum_x += fx * (0.25f + 0.75f * fabsf(fx)) * POINTER_MAX_SPEED;
+                ps3_cursor_accum_y += fy * (0.25f + 0.75f * fabsf(fy)) * POINTER_MAX_SPEED;
                 dx = (int)ps3_cursor_accum_x;
                 dy = (int)ps3_cursor_accum_y;
                 ps3_cursor_accum_x -= (float)dx;

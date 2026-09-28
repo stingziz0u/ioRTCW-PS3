@@ -619,6 +619,21 @@ vm_t *VM_Create( const char *module, intptr_t (*systemCalls)(intptr_t *),
 
 	Q_strncpyz(vm->name, module, sizeof(vm->name));
 
+#ifdef __PS3__
+	// the game modules are linked into the EBOOT (no dll loading on PS3)
+	{
+		extern qboolean PS3_HasNativeModule( const char *name );
+
+		if ( PS3_HasNativeModule( module ) ) {
+			vm->dllHandle = Sys_LoadGameDll( module, &vm->entryPoint, VM_DllSyscall );
+			if ( vm->dllHandle ) {
+				vm->systemCall = systemCalls;
+				return vm;
+			}
+		}
+	}
+#endif
+
 	do
 	{
 		retval = FS_FindVM(&startSearch, filename, sizeof(filename), module, (interpret == VMI_NATIVE));

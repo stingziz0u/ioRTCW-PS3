@@ -1,0 +1,17 @@
+/* Partial-link (ld -r) script for a linked-in game module (@MOD@).
+   Brackets its writable data so Sys_LoadGameDll can reset it on every load.
+   Generated per module by the Makefile (@MOD@ -> qagame/cgame/ui). */
+SECTIONS
+{
+  .data : {
+    __@MOD@_data_start = .;
+    *(.data .data.*)
+    __@MOD@_data_end = .;
+  }
+  .bss : {
+    __@MOD@_bss_start = .;
+    *(.bss .bss.*)
+    *(COMMON)
+    __@MOD@_bss_end = .;
+  }
+}

@@ -1,457 +1,272 @@
-/* ps3_main.c -- PS3 entry point. */
+/* ps3_main.c -- PS3 entry point for iortcw SP.
+ *
+ * Boot steps are numbered in the log ([0]..[8]) so a black screen or a hang
+ * still says how far it got.
+ *
+ * STAGE 1 (make STAGE=1): headless. Engine + server + linked-in qagame, no
+ * video/input/sound. Loads every .bsp in maps/ one after another, logs
+ * how much hunk each one needs, and quits. Validates the engine, endianness,
+ * the pk3 filesystem and the game module before any renderer work. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <malloc.h>
 
 #include <ppu-types.h>
-#include <rsx/rsx.h>
 #include <sysutil/sysutil.h>
-#include <sysmodule/sysmodule.h>
-#include <io/pad.h>
 #include <sys/thread.h>
 #include <sys/process.h>
-#include <net/net.h>
 
 #include "qcommon/q_shared.h"
 #include "qcommon/qcommon.h"
 
-#include "../sys/ps3_account.h"
-#include "../sys/ps3_glimp.h"
-#include "../input/ps3_input.h"
-#include "../input/ps3_osk.h"
-#include "../audio/ps3_snd.h"
+#include "sys/sys_local.h"
 
-#include "GL/gl.h"
-#include "renderercommon/tr_types.h"
-#include "renderercommon/tr_public.h"
-extern refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp);
-extern void Com_WriteConfiguration(void);
+#include "ps3_log.h"
 
-#ifdef CLASSIC
-#include "zpack_classic_embedded.h"
-#elif defined(ELITEFORCE)
-/* No fix-pak yet for this flavor (v1). */
-#elif defined(STANDALONERA)
-/* Runs on retail assets alone, no fix-pak. */
-#else
-#include "pak9_ps3_embedded.h"
-#ifdef STANDALONETA
-#include "pak4_ps3_embedded.h"
-#endif
+#ifndef PS3_STAGE
+#define PS3_STAGE 2
 #endif
 
 SYS_PROCESS_PARAM(1001, 0x100000);
+
+#define PS3_GAME_STACK (2 * 1024 * 1024)
+
+extern unsigned PS3_FreeUserMemMB(void);
 
 static volatile int ps3_running = 1;
 
 static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
 {
-    (void)userdata;
-    switch (status) {
-        case SYSUTIL_EXIT_GAME:
-            ps3_running = 0;
-            break;
-        case SYSUTIL_DRAW_BEGIN:
-        case SYSUTIL_DRAW_END:
-            break;
-        case SYSUTIL_OSK_LOADED:
-        case SYSUTIL_OSK_DONE:
-        case SYSUTIL_OSK_UNLOADED:
-        case SYSUTIL_OSK_INPUT_ENTERED:
-        case SYSUTIL_OSK_INPUT_CANCELED:
-            PS3_OSK_SysutilCallback(status, param);
-            break;
-        default:
-            break;
-    }
+    (void)param; (void)userdata;
+    if (status == SYSUTIL_EXIT_GAME)
+        ps3_running = 0;
 }
 
-#include "ps3_gamedir_defs.h"
-
-#ifdef PS3_DEBUG
-static const char *ps3_log_path = "/dev_hdd0/data/ioq3/" PS3_LOG_SUFFIX;
-#endif
-
-void ps3_log(const char *msg)
+void PS3_Pump(void)
 {
-#ifdef PS3_DEBUG
-    FILE *f = fopen(ps3_log_path, "a");
-    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
-#else
-    (void)msg;
-#endif
+    sysUtilCheckCallback();
 }
 
-#ifdef PS3_DEBUG
-#define PS3LOG(fmt, ...) do { \
-    char _lb[256]; \
-    snprintf(_lb, sizeof(_lb), fmt, ##__VA_ARGS__); \
-    ps3_log(_lb); \
-} while (0)
-#else
-#define PS3LOG(fmt, ...) ((void)0)
-#endif
-
-/* Try HDD, fall back to USB (any of usb000..usb006 -- a stick can enumerate
- * on any port depending on how many devices are plugged in). */
-static char ps3_base_path[64] = "/dev_hdd0/data/ioq3";
-
-/* PS3_GAMEDIR doubles as the fs_game value and the boot-presence probe dir --
- * that coincidence holds for every flavor that ships its own pak0.pk3 in its
- * game dir (Q3/OA/EF, and TA's "missionpack"). Rocket Arena doesn't: "arena"
- * holds only mod-numbered paks layered on retail Q3A, no pak0.pk3 of its own.
- * So its boot proof is baseq3/pak0.pk3, while fs_game still uses PS3_GAMEDIR. */
-#if defined(STANDALONERA)
-#define PS3_BOOT_PROBE_DIR "baseq3"
-#else
-#define PS3_BOOT_PROBE_DIR PS3_GAMEDIR
-#endif
-
-static qboolean PS3_SetupFilesystem(void)
+int PS3_Running(void)
 {
-    char probe[128];
-    char usb_path[64];
+    return ps3_running;
+}
 
-    snprintf(probe, sizeof(probe), "/dev_hdd0/data/ioq3/" PS3_BOOT_PROBE_DIR "/pak0.pk3");
-    FILE *f = fopen(probe, "rb");
-    if (f) {
-        fclose(f);
-        chdir(ps3_base_path);
-        PS3LOG("Using HDD path: %s", ps3_base_path);
-        return qtrue;
-    }
+/* [3] USRDIR must be writable: config, saves and this log live there. */
+static qboolean PS3_CheckUsrdir(void)
+{
+    FILE *f = fopen(PS3_USRDIR "/write.test", "wb");
 
-    for (int usb = 0; usb < 7; usb++) {
-        snprintf(usb_path, sizeof(usb_path), "/dev_usb%03d/quake3", usb);
-        snprintf(probe, sizeof(probe), "%s/" PS3_BOOT_PROBE_DIR "/pak0.pk3", usb_path);
+    if (!f)
+        return qfalse;
+    fclose(f);
+    remove(PS3_USRDIR "/write.test");
+    Sys_Mkdir(PS3_USRDIR "/" BASEGAME);
+    return qtrue;
+}
 
-        f = fopen(probe, "rb");
+/* [4] Game data present + endianness sanity: a pk3 starts with "PK\3\4",
+ * which read as a little-endian int is 0x04034b50. */
+static qboolean PS3_CheckData(void)
+{
+    static const char *paks[] = { "pak0.pk3", "sp_pak1.pk3", "sp_pak2.pk3", "sp_pak3.pk3" };
+    qboolean ok = qtrue;
+    int i;
+
+    for (i = 0; i < (int)ARRAY_LEN(paks); i++) {
+        char path[MAX_OSPATH];
+        unsigned char hdr[4] = { 0 };
+        FILE *f;
+        long size = -1;
+
+        Com_sprintf(path, sizeof(path), PS3_USRDIR "/" BASEGAME "/%s", paks[i]);
+        f = fopen(path, "rb");
         if (f) {
+            if (fread(hdr, 1, 4, f) != 4)
+                memset(hdr, 0, sizeof(hdr));
+            fseek(f, 0, SEEK_END);
+            size = ftell(f);
             fclose(f);
-            chdir(usb_path);
-            snprintf(ps3_base_path, sizeof(ps3_base_path), "%s", usb_path);
-            PS3LOG("Using USB path: %s", ps3_base_path);
-            return qtrue;
+        }
+        PS3_Logf("[4]   %-12s %s  size=%ld  magic=%02x%02x%02x%02x", paks[i],
+                 f ? "found" : "MISSING", size, hdr[0], hdr[1], hdr[2], hdr[3]);
+        if (!f)
+            ok = qfalse;
+        else if (i == 0) {
+            int le = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (hdr[3] << 24);
+            PS3_Logf("[4]   pk3 magic as little-endian int: 0x%08x (%s)", le,
+                     le == 0x04034b50 ? "ok" : "WRONG");
+        }
+    }
+    return ok;
+}
+
+#if PS3_STAGE == 1
+
+extern int Hunk_MemoryRemaining(void);
+
+/* Runs Com_Frame until the server is up on the requested map (or it fails).
+ * The "map" command itself goes through the command buffer so it executes
+ * inside Com_Frame, under its ERR_DROP setjmp. */
+static qboolean PS3_Stage1_LoadMap(const char *map, int hunkTotalMB)
+{
+    int start = Sys_Milliseconds();
+    int frames;
+    qboolean up = qfalse;
+    int remaining;
+
+    PS3_Logf("[6] ---- map %s ----", map);
+    Cbuf_AddText(va("map %s\n", map));
+
+    for (frames = 0; frames < 400 && ps3_running; frames++) {
+        PS3_Pump();
+        Com_Frame();
+        if (com_sv_running->integer &&
+            !Q_stricmp(Cvar_VariableString("mapname"), map)) {
+            if (!up) {
+                up = qtrue;
+                PS3_Logf("[6] %s: server up after %d frames, %d ms", map, frames,
+                         Sys_Milliseconds() - start);
+                frames = 340;   /* then run 60 more server frames */
+            }
+        } else if (up) {
+            break;              /* dropped after starting */
         }
     }
 
-    printf("FATAL: " PS3_BOOT_PROBE_DIR "/pak0.pk3 not found on HDD or USB\n");
-    PS3LOG("FATAL: " PS3_BOOT_PROBE_DIR "/pak0.pk3 not found");
-    return qfalse;
+    remaining = Hunk_MemoryRemaining();
+    PS3_Logf("[6] %s: %s  hunk used %.1f MB of %d MB  free user mem ~%u MB",
+             map, (up && com_sv_running->integer) ? "OK" : "FAILED",
+             (hunkTotalMB * 1024.0f * 1024.0f - remaining) / (1024.0f * 1024.0f),
+             hunkTotalMB, PS3_FreeUserMemMB());
+    Cbuf_AddText("meminfo\n");
+    Com_Frame();
+    return up;
 }
 
-static unsigned int PS3_FileChecksum(const char *path)
+static void PS3_Stage1(void)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0xFFFFFFFFu;
-    unsigned int csum = 0;
-    unsigned char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        for (size_t i = 0; i < n; i++) csum += buf[i];
+    char **maps;
+    int numMaps, i, ok = 0;
+    int hunkMB;
+
+    maps = FS_ListFiles("maps", ".bsp", &numMaps);
+    hunkMB = Cvar_VariableIntegerValue("com_hunkMegs");
+    PS3_Logf("[6] stage 1: %d maps found, hunk %d MB", numMaps, hunkMB);
+
+    for (i = 0; i < numMaps && ps3_running; i++) {
+        char map[MAX_QPATH];
+
+        COM_StripExtension(maps[i], map, sizeof(map));
+        if (PS3_Stage1_LoadMap(map, hunkMB))
+            ok++;
     }
-    fclose(f);
-    return csum;
+    FS_FreeFileList(maps);
+
+    PS3_Logf("[6] stage 1 done: %d of %d maps loaded", ok, numMaps);
 }
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE) && !defined(STANDALONERA)
-static void PS3_ExtractBundledPak9(void)
+#endif /* PS3_STAGE == 1 */
+
+static char ps3_cmdline[1024];
+static char ps3_hunkarg[64];
+
+static void PS3_GameThread(void *arg)
 {
-    char destpath[256];
-    snprintf(destpath, sizeof(destpath), "%s/baseq3/pak9-ps3.pk3", ps3_base_path);
+    (void)arg;
 
-    if (PS3_FileChecksum(destpath) == pak9_ps3_data_csum) {
-        PS3LOG("pak9-ps3.pk3 up to date, skipping");
-        return;
+    ps3_log("[1] game thread started");
+
+    sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, ps3_sysutil_callback, NULL);
+    ps3_log("[2] sysutil callback registered");
+
+    if (!PS3_CheckUsrdir()) {
+        ps3_log("[3] FATAL: " PS3_USRDIR " is not writable");
+        sysThreadExit(1);
     }
+    ps3_log("[3] USRDIR writable");
 
-    FILE *f = fopen(destpath, "wb");
-    if (!f) {
-        printf("[ps3] WARNING: could not write %s\n", destpath);
-        return;
+    if (!PS3_CheckData()) {
+        ps3_log("[4] FATAL: game data missing, copy the pk3 files to " PS3_USRDIR "/" BASEGAME);
+        sysThreadExit(1);
     }
-    size_t written = fwrite(pak9_ps3_data, 1, pak9_ps3_data_len, f);
-    fclose(f);
-    if (written == pak9_ps3_data_len)
-        printf("[ps3] Extracted pak9-ps3.pk3 -> baseq3\n");
-    else
-        printf("[ps3] WARNING: pak9-ps3.pk3 write incomplete (%u/%u)\n",
-               (unsigned)written, pak9_ps3_data_len);
-}
-#endif /* !STANDALONEOA && !CLASSIC && !ELITEFORCE && !STANDALONERA */
+    ps3_log("[4] game data found");
 
-#ifdef STANDALONETA
-static void PS3_ExtractBundledPak4(void)
-{
-    char destpath[256];
-    snprintf(destpath, sizeof(destpath), "%s/missionpack/pak4-ps3.pk3", ps3_base_path);
+    Sys_PlatformInit();
 
-    if (PS3_FileChecksum(destpath) == pak4_ps3_data_csum) {
-        PS3LOG("pak4-ps3.pk3 up to date, skipping");
-        return;
+#if PS3_STAGE == 1
+    /* Measure, don't guess: give the hunk what is free minus the zone and a
+     * margin for mallocs, so the log shows what each map really needs. */
+    {
+        int freeMB = (int)PS3_FreeUserMemMB();
+        int hunkMB = freeMB - PS3_DEF_COMZONEMEGS - 24;
+
+        if (hunkMB > 160)
+            hunkMB = 160;
+        if (hunkMB < PS3_MIN_COMHUNKMEGS)
+            hunkMB = PS3_MIN_COMHUNKMEGS;
+        PS3_Logf("[4] free ~%d MB -> com_hunkMegs %d", freeMB, hunkMB);
+        Com_sprintf(ps3_hunkarg, sizeof(ps3_hunkarg), "+set com_hunkMegs %d ", hunkMB);
     }
-
-    FILE *f = fopen(destpath, "wb");
-    if (!f) {
-        printf("[ps3] WARNING: could not write %s\n", destpath);
-        return;
-    }
-    size_t written = fwrite(pak4_ps3_data, 1, pak4_ps3_data_len, f);
-    fclose(f);
-    if (written == pak4_ps3_data_len)
-        printf("[ps3] Extracted pak4-ps3.pk3 -> missionpack\n");
-    else
-        printf("[ps3] WARNING: pak4-ps3.pk3 write incomplete (%u/%u)\n",
-               (unsigned)written, pak4_ps3_data_len);
-}
 #endif
 
-#ifdef CLASSIC
-static void PS3_ExtractBundledZpackClassic(void)
-{
-    char destpath[256];
-    snprintf(destpath, sizeof(destpath), "%s/baseq3/zpack-classic.pk3", ps3_base_path);
+    Com_sprintf(ps3_cmdline, sizeof(ps3_cmdline),
+        "+set fs_basepath " PS3_USRDIR " "
+        "+set fs_homepath " PS3_USRDIR " "
+        "+set fs_steampath \"\" "
+        "+set fs_gogpath \"\" "
+#if PS3_STAGE == 1
+        "+set dedicated 1 "
+        "+set sv_fps 20 "
+        "%s"
+#endif
+        "+set vm_game 0 +set vm_cgame 0 +set vm_ui 0 "
+        "+set com_logfile 0"
+#if PS3_STAGE == 1
+        , ps3_hunkarg
+#endif
+        );
 
-    if (PS3_FileChecksum(destpath) == zpack_classic_data_csum) {
-        PS3LOG("zpack-classic.pk3 up to date, skipping");
-        return;
-    }
+    ps3_log("[5] Com_Init");
+    Com_Init(ps3_cmdline);
+    PS3_Logf("[5] Com_Init done, free user mem ~%u MB", PS3_FreeUserMemMB());
 
-    FILE *f = fopen(destpath, "wb");
-    if (!f) {
-        printf("[ps3] WARNING: could not write %s\n", destpath);
-        return;
-    }
-    size_t written = fwrite(zpack_classic_data, 1, zpack_classic_data_len, f);
-    fclose(f);
-    if (written == zpack_classic_data_len)
-        printf("[ps3] Extracted zpack-classic.pk3 -> baseq3\n");
-    else
-        printf("[ps3] WARNING: zpack-classic.pk3 write incomplete (%u/%u)\n",
-               (unsigned)written, zpack_classic_data_len);
-}
+#if PS3_STAGE == 1
+    PS3_Stage1();
+#else
+#error "Stage 2 (client) is not written yet"
 #endif
 
-/* See ps3_account.h: this feeds Cvar_Get's default so cvar_restart keeps it.
- * Strip quotes/ctrl chars so the name can't break userinfo/cvar parsing. */
-static char ps3_nick[64];
-
-void PS3_InitDefaultPlayerName(void)
-{
-    extern char *Sys_GetCurrentUser(void);
-    const char *src = Sys_GetCurrentUser();
-    size_t o = 0;
-
-    if (src) {
-        for (size_t i = 0; src[i] && o < sizeof(ps3_nick) - 1; i++) {
-            unsigned char c = (unsigned char)src[i];
-            if (c == '"' || c == '\\' || c == ';' || c < 0x20) continue;
-            ps3_nick[o++] = (char)c;
-        }
-    }
-    ps3_nick[o] = '\0';
-    if (ps3_nick[0] == '\0')
-        snprintf(ps3_nick, sizeof(ps3_nick), "%s", "player");
-    PS3LOG("[user] default nick='%s'", ps3_nick);
-}
-
-const char *PS3_DefaultPlayerName(void)
-{
-    if (ps3_nick[0] == '\0')
-        return "player";
-    return ps3_nick;
+    ps3_log("[8] shutdown");
+    SV_Shutdown("Server quit");
+    Com_Shutdown();
+    FS_Shutdown(qtrue);
+    ps3_log("[8] shutdown done");
+    sysThreadExit(0);
 }
 
 int main(int argc, char *argv[])
 {
+    sys_ppu_thread_t tid;
+    u64 retval = 0;
+    s32 ret;
+
     (void)argc; (void)argv;
 
-    sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, ps3_sysutil_callback, NULL);
+    PS3_LogInit();
+    PS3_Logf("[0] main reached: iortcw-ps3 stage %d, built " __DATE__ " " __TIME__, PS3_STAGE);
 
-    printf(PS3_TITLE " starting...\n");
-
-#ifdef PS3_DEBUG
-    { FILE *f = fopen(ps3_log_path, "w"); if (f) fclose(f); }
-    PS3LOG("main() reached");
-#endif
-
-    if (!PS3_SetupFilesystem()) {
-        printf("FATAL: could not find game data. Halting.\n");
-        PS3LOG("FATAL: filesystem setup failed");
-        while (ps3_running) {
-            sysUtilCheckCallback();
-        }
+    ret = sysThreadCreate(&tid, PS3_GameThread, NULL, 1000, PS3_GAME_STACK,
+                          THREAD_JOINABLE, "iortcw");
+    if (ret != 0) {
+        PS3_Logf("[1] FATAL: sysThreadCreate failed (0x%08x)", ret);
+        PS3_LogShutdown();
         return 1;
     }
-    PS3LOG("Filesystem ready");
+    sysThreadJoin(tid, &retval);
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE) && !defined(STANDALONERA)
-    PS3_ExtractBundledPak9();
-#endif
-#ifdef STANDALONETA
-    PS3_ExtractBundledPak4();
-#endif
-#ifdef CLASSIC
-    PS3_ExtractBundledZpackClassic();
-#endif
-
-    PS3LOG("boot: pak extract done");
-    PS3_Input_Init();
-    printf("[ps3] Input OK\n");
-    PS3LOG("boot: PS3_Input_Init done");
-    PS3_OSK_Init();
-    PS3LOG("boot: PS3_OSK_Init done");
-
-    /* RSX must be up before Com_Init -- CL_Init issues BeginFrame immediately. */
-    PS3_RSX_Init();
-    printf("[ps3] RSX init done\n");
-    PS3LOG("boot: PS3_RSX_Init done");
-
-    /* Pre-init renderer so Com_Printf -> SCR_UpdateScreen is safe. */
-    extern refexport_t re;
-    refexport_t *ref = GetRefAPI(REF_API_VERSION, NULL);
-    if (ref) re = *ref;
-    PS3LOG("boot: GetRefAPI done");
-
-    /* Upstream sys_main.c's main() is replaced, so do this ourselves. */
-    extern void Sys_PlatformInit(void);
-    Sys_PlatformInit();
-    PS3LOG("boot: Sys_PlatformInit done");
-
-    /* Must run before Com_Init: CL_Init uses it as the "name" cvar's compiled-in
-     * default, which is what makes it survive cvar_restart (setup menu Defaults). */
-    PS3_InitDefaultPlayerName();
-    PS3LOG("boot: PS3_InitDefaultPlayerName done");
-
-    static char cmdline[2048];
-    snprintf(cmdline, sizeof(cmdline),
-        "+set fs_basepath %s "
-        "+set fs_homepath %s "
-        "+set fs_steampath \"\" "
-        "+set fs_gogpath \"\" "
-        "+set fs_game " PS3_GAMEDIR " "
-        "+set com_hunkMegs 96 "
-        "+set com_zoneMegs 24 "
-        "+set max_routingcache 6144 "
-        "+set r_mode -1 "
-        "+set r_customwidth 1280 "
-        "+set r_customheight 720 "
-        "+set r_picmip 1 "
-        "+set r_dynamic 1 "
-        "+set r_flares 0 "
-        "+set r_fastsky 0 "
-        "+set r_lodbias 0 "
-        "+set r_subdivisions 4 "
-        "+set r_drawSun 0 "
-        "+set r_primitives 2 "
-        "+set com_maxfps 60 "         /* uncapped floods the GCM buffer and stalls mid-frame, keep the cap */
-        "+set pmove_fixed 1 "
-        "+set s_khz 48 "
-        "+set com_soundMegs 6 "       /* 8 needs 24.2 MB and lv2 hangs; capped anyway in SND_setup */
-        "+set sv_pure 0 "
-        "+set cl_allowDownload 1 "
-        "+set g_doWarmup 0 "          /* warmup map_restart on slow cgame reload = serverId race, don't turn this on */
-#ifdef PS3_NATIVE_GAME
-        "+set vm_game 0 "             /* linked-in qagame; beats the archived ioq3 default of 2 */
-#endif
-        "+set sv_maxclients 8 "
-        "+set in_joystick 1 "
-        "+set in_joystickUseAnalog 1 "
-        "+set j_pitch_axis 3 "
-        "+set j_yaw_axis 4 "
-        "+set net_enabled 1 "
-        "+set net_port 27960 "
-        "+set fraglimit 0 "
-        "+set timelimit 0 "
-#ifdef PS3_DEBUG
-        "+set com_logfile 2",
-#else
-        "+set com_logfile 0",
-#endif
-        ps3_base_path, ps3_base_path
-    );
-
-    /* Hashed by CL_UpdateGUID into cl_guid; OA QVM rejects empty guid. */
-    {
-        char qkeypath[256];
-        snprintf(qkeypath, sizeof(qkeypath), "%s/qkey", ps3_base_path);
-        FILE *kf = fopen(qkeypath, "rb");
-        if (kf) {
-            fclose(kf);
-        } else {
-            kf = fopen(qkeypath, "wb");
-            if (kf) {
-                unsigned char buf[2048];
-                for (int i = 0; i < 2048; i++) buf[i] = (unsigned char)(i & 0xFF);
-                fwrite(buf, 1, 2048, kf);
-                fclose(kf);
-                printf("[ps3] Created qkey file\n");
-            }
-        }
-    }
-
-    printf("[ps3] Calling Com_Init...\n");
-    PS3LOG("boot: entering Com_Init");
-    Com_Init(cmdline);
-    printf("[ps3] Com_Init done\n");
-    PS3LOG("boot: Com_Init done");
-
-    /* PSL1GHT net module must load before ioq3's NET_Init. */
-    {
-        sysModuleLoad(SYSMODULE_NET);
-        PS3_Net_Init();
-    }
-
-    NET_Init();
-    printf("[ps3] NET_Init done\n");
-    PS3LOG("boot: NET_Init done, entering frame loop");
-
-#ifdef PS3_DEBUG
-    int boot_frames = 0;
-#endif
-    while (ps3_running) {
-        sysUtilCheckCallback();
-        PS3_Input_Frame();
-
-        if (PS3_Input_QuitPressed()) {
-            Com_Quit_f();
-            break;
-        }
-
-#ifdef PS3_DEBUG
-        /* Bracket the first frames only: a freeze inside frame 1 must be
-         * distinguishable from one before the loop was ever reached. */
-        if (boot_frames < 5) {
-            PS3LOG("boot: Com_Frame enter");
-            Com_Frame();
-            PS3LOG("boot: Com_Frame exit");
-            boot_frames++;
-            continue;
-        }
-#endif
-        Com_Frame();
-    }
-
-    /* XMB exit path: sysutil callback set ps3_running=0, Com_Quit_f never ran,
-       so flush config and shut down manually here. */
-    if (!ps3_running) {
-        Com_WriteConfiguration();
-        SV_Shutdown("Server quit");
-        CL_Shutdown("Client quit", qtrue, qtrue);
-        Com_Shutdown();
-        FS_Shutdown(qtrue);
-    }
-
-    PS3_OSK_Shutdown();
-    PS3_Snd_Shutdown();
-    PS3_Input_Shutdown();
-    PS3_RSX_Shutdown();
-    NET_Shutdown();
-    PS3_Net_Shutdown();
-
-    PS3LOG("Clean shutdown");
-    return 0;
+    PS3_Logf("exit code %d", (int)retval);
+    PS3_LogShutdown();
+    return (int)retval;
 }

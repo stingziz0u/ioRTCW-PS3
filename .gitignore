@@ -16,3 +16,5 @@ PARAM.SFO
 *.swp
 .DS_Store
 Thumbs.db
+/obj/
+iortcw-ps3*.log

@@ -1,11 +1,7 @@
+/* ps3_platform.h -- force-included in every translation unit (-include). */
+
 #ifndef PS3_PLATFORM_H
 #define PS3_PLATFORM_H
-
-/* Take ioq3's Linux path; least side effects on newlib. */
-#if !defined(__linux__) && !defined(WIN32) && !defined(MACOS_X) && \
-    !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__PS3__)
-#  define __linux__
-#endif
 
 /* Cell PPU is big-endian; must land before q_platform.h. */
 #ifndef __BIG_ENDIAN
@@ -20,28 +16,8 @@
 #ifndef __FLOAT_WORD_ORDER
 #  define __FLOAT_WORD_ORDER __BIG_ENDIAN
 #endif
-#undef  Q3_LITTLE_ENDIAN
-#define Q3_BIG_ENDIAN
 
-#ifndef OS_STRING
-#  define OS_STRING "ps3"
-#endif
-#ifndef ARCH_STRING
-#  define ARCH_STRING "cell"
-#endif
-#ifndef PATH_SEP
-#  define PATH_SEP '/'
-#endif
-#ifndef DLL_EXT
-#  define DLL_EXT ".sprx"
-#endif
-
-
-#ifndef ID_INLINE
-#  define ID_INLINE __inline__
-#endif
 #pragma GCC diagnostic ignored "-Wattributes"
-
 
 #include <stddef.h>
 #include <stdint.h>
@@ -75,7 +51,7 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 
 /* newlib on PS3 has no 64-bit file offsets for unzip.c. */
 #define IOAPI_NO_64BIT
-
+#define IOAPI_NO_64     /* this minizip spells it without BIT */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wmissing-braces"
@@ -92,51 +68,29 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #include "sys/ps3_net.h"
 #endif
 
-/* Memory tuning for ~145 MB free user RAM at boot — this budget is razor thin, don't get greedy. */
-#undef  MIN_DEDICATED_COMHUNKMEGS
-#undef  MIN_COMHUNKMEGS
-#undef  DEF_COMHUNKMEGS
-#undef  DEF_COMZONEMEGS
-#define MIN_DEDICATED_COMHUNKMEGS 16
-#define MIN_COMHUNKMEGS           16
-#define DEF_COMHUNKMEGS           96
-#define DEF_COMZONEMEGS           24
+/* ---- Paths -------------------------------------------------------------- */
 
-/* Ceiling on com_soundMegs, enforced in SND_setup (snd_mem.c), because the cvar
- * is CVAR_ARCHIVE and a stale config outranks the boot cmdline. 6 => 18.1 MB of
- * the ~23 MB left after hunk+zone; 8 wants 24.2 MB and hangs lv2. See CLAUDE.md. */
-#define PS3_MAX_COMSOUNDMEGS      6
+#ifndef PS3_APPID
+#define PS3_APPID "IORTCWPS3"
+#endif
+/* Everything (game data, config, saves, log) lives in the game's USRDIR. */
+#define PS3_USRDIR   "/dev_hdd0/game/" PS3_APPID "/USRDIR"
+#define PS3_LOG_PATH PS3_USRDIR "/iortcw-ps3.log"
 
-#ifndef MAX_RELIABLE_COMMANDS
-#define MAX_RELIABLE_COMMANDS   32      /* stock: 64 */
+/* ---- Memory ------------------------------------------------------------- */
+/* Hunk/zone sizes for common.c (iortcw SP wants a 128 MB minimum hunk, which
+ * does not fit in what lv2 leaves us). Integers, not strings. */
+#define PS3_MIN_COMHUNKMEGS  32
+#ifndef PS3_DEF_COMHUNKMEGS
+#define PS3_DEF_COMHUNKMEGS  80
 #endif
-#ifndef PACKET_BACKUP
-#define PACKET_BACKUP           32
-#endif
-#ifndef PACKET_MASK
-#define PACKET_MASK             (PACKET_BACKUP-1)
-#endif
-#ifndef MAX_DOWNLOAD_WINDOW
-#define MAX_DOWNLOAD_WINDOW     16      /* stock: 48 */
-#endif
-
-/* cl_parse.c voice chat indexes stream (sender + MAX_CLIENTS + 1), and MAX_CLIENTS is hardcoded
- * 64 in q_shared.h no matter what you -D override. Undersize this and it writes OOB into s_rawsamples[]. */
-#ifndef MAX_RAW_STREAMS
-#define MAX_RAW_STREAMS (2 * 64 + 1)
-#endif
-/* Do not bump for all streams (hangs at boot, see CLAUDE.md memory budget) --
- * stream 0 gets its own deeper buffer via MAX_RAW_SAMPLES_STREAM0 instead. */
-#ifndef MAX_RAW_SAMPLES
-#define MAX_RAW_SAMPLES  8192          /* stock: 16384, see comment above */
-#endif
-#ifndef MAX_RAW_SAMPLES_STREAM0
-#define MAX_RAW_SAMPLES_STREAM0  16384
+#ifndef PS3_DEF_COMZONEMEGS
+#define PS3_DEF_COMZONEMEGS  24
 #endif
 
 #define USE_INTERNAL_SDL_HEADERS
 
-/* PSL1GHT's COLOR_* macros collide with ioq3's console color constants. */
+/* PSL1GHT's COLOR_* macros collide with the engine's console color constants. */
 #undef COLOR_BLACK
 #undef COLOR_RED
 #undef COLOR_GREEN

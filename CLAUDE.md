@@ -51,6 +51,34 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
 | Datos del usuario | versión Steam 1.41: `pak0.pk3`, `sp_pak1.pk3`, `sp_pak2.pk3`, `sp_pak3.pk3` en `USRDIR/main/` |
 | Toolchain del dueño | `ppu-gcc` 7.2.0 (ps3toolchain), `/usr/local/ps3dev` |
 
+## Build
+
+- `make STAGE=1`: headless (motor + server + qagame, sin video/input/audio).
+  Recorre todos los `maps/*.bsp`, loguea el hunk que usa cada uno y sale.
+  PKG: `iortcw-ps3-stage1.pkg`.
+- `make` (STAGE=2, juego completo): todavía no existe.
+- `DEBUG=1` en cualquiera. Cada variante tiene su `obj/<variante>`: no hace
+  falta `make clean` al cambiar.
+- `make getlog PS3IP=…` baja `USRDIR/iortcw-ps3.log` por FTP.
+- El link corre `make check`: `.got` < 0x10000 y cero stubs `r2off`.
+- **Toolchain en una sesión nueva de la nube**: `bash tools/setup-cloud-toolchain.sh`
+  (~25 min; mismo gcc 7.2 que el dueño, fuentes desde mirrors de GitHub).
+
+## Decisiones del port
+
+- **Sin red**: `code/sys/ps3_net_null.c` reemplaza `net_ip.c`. Cliente y
+  servidor locales usan el loopback del motor; no se carga el módulo de red.
+- Módulos linkeados: `Sys_LoadGameDll` (`ps3_sys.c`) busca por nombre en una
+  tabla; `VM_Create` (`vm.c`, `#ifdef __PS3__`) va directo ahí sin buscar
+  archivos. Cada módulo: `ld -r -T ps3_module.ld` + `objcopy` (Makefile).
+- Estático de los módulos (medido): qagame ~6.6 MB de bss, cgame ~17 MB
+  (`cgModelInfo` 5.6 MB, `cg_entities` 4.1 MB), ui ~2.5 MB. Candidatos a
+  achicar si falta memoria.
+- Stack del hilo del juego: 2 MB. El peor frame medido
+  (`-fstack-usage`) es `CM_GeneratePatchCollide`, 325 KB.
+- `ps3_setjmp.S` + `sys/include/setjmp.h` (de Mayo): el setjmp de newlib pisa
+  el stack. Nunca sacarlos.
+
 ## Restricciones heredadas de IoQuake3-PS3 (no romper)
 
 - **TOC única de 64 KB**: `ppu-gcc` 7.2 no tiene `-mcmodel`. Linkear con

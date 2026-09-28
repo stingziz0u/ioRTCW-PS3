@@ -165,6 +165,22 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #endif
 
+//=================================================================== PS3 ===
+
+#ifdef __PS3__
+
+#define OS_STRING "ps3"
+#define ID_INLINE inline
+#define PATH_SEP '/'
+
+#define ARCH_STRING "cell"
+
+#define Q3_BIG_ENDIAN
+
+#define DLL_EXT ".sprx"
+
+#endif
+
 //================================================================= LINUX ===
 
 #if defined(__linux__) || defined(__FreeBSD_kernel__) || defined(__GNU__)

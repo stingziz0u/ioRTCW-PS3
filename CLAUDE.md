@@ -48,7 +48,7 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
 | Título en el XMB | `Return to Castle Wolfenstein` |
 | APPID / TITLE_ID | `IORTCWPS3` (9 caracteres, obligatorio) |
 | Ícono | `ICON0.PNG` (320×176 RGBA) |
-| Datos del usuario | versión Steam 1.41: `pak0.pk3`, `sp_pak1.pk3`, `sp_pak2.pk3`, `sp_pak3.pk3` en `USRDIR/main/` |
+| Datos del usuario | versión Steam 1.41: `pak0.pk3`, `sp_pak1.pk3` … `sp_pak4.pk3` en `USRDIR/main/` (`files.c` exige los cuatro `sp_pak`: `NUM_SP_PAKS 4`) |
 | Toolchain del dueño | `ppu-gcc` 7.2.0 (ps3toolchain), `/usr/local/ps3dev` |
 
 ## Build

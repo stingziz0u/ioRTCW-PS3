@@ -16,6 +16,8 @@ its `Main` folder to `/dev_hdd0/game/IORTCWPS3/USRDIR/main/` over FTP:
 - `sp_pak1.pk3`
 - `sp_pak2.pk3`
 - `sp_pak3.pk3`
+- `sp_pak4.pk3` (GOTY/Steam; if yours lacks it, it comes in iortcw's
+  `patch-data-141.zip`)
 
 ## Credits
 

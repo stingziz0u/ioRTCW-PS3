@@ -70,7 +70,7 @@ static qboolean PS3_CheckUsrdir(void)
  * which read as a little-endian int is 0x04034b50. */
 static qboolean PS3_CheckData(void)
 {
-    static const char *paks[] = { "pak0.pk3", "sp_pak1.pk3", "sp_pak2.pk3", "sp_pak3.pk3" };
+    static const char *paks[] = { "pak0.pk3", "sp_pak1.pk3", "sp_pak2.pk3", "sp_pak3.pk3", "sp_pak4.pk3" };
     qboolean ok = qtrue;
     int i;
 

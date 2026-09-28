@@ -1,0 +1,5 @@
+Vendored from https://github.com/iortcw/iortcw
+Commit 438e7d413b5f7277187c35b032eb0ef9093ae778 (2024-05-26), directory SP/.
+Copied unmodified: SP/code/{asm,botlib,cgame,client,game,null,qcommon,renderer,
+server,splines,sys,ui,jpeg-8c,zlib-1.2.11} -> code/, SP/main/ui/menudef.h -> main/ui/.
+Not copied: SDL2, AL, curl, freetype, opus, ogg/vorbis, rend2, tools, prebuilt libs.

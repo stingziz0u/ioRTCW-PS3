@@ -335,6 +335,13 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	if ( !tr.registered ) {
 		return;
 	}
+#ifdef __PS3__
+	{
+		// wait for a free framebuffer and open the ps3gl frame
+		extern void PS3_RSX_BeginFrame( void );
+		PS3_RSX_BeginFrame();
+	}
+#endif
 	glState.finishCalled = qfalse;
 
 	tr.frameCount++;

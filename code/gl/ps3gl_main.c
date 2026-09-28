@@ -3,6 +3,7 @@
 #include "ps3gl.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /* Non-zero init forces .data placement; overwritten in ps3gl_init(). */
 ps3gl_state_t *ps3gl_ptr = (ps3gl_state_t *)0x1;

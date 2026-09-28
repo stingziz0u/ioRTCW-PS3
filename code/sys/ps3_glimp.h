@@ -10,5 +10,7 @@ void PS3_RSX_Init(void);
 void PS3_RSX_Shutdown(void);
 void PS3_RSX_BeginFrame(void);
 void PS3_RSX_EndFrame(void);
+int  PS3_RSX_Width(void);
+int  PS3_RSX_Height(void);
 
 #endif /* PS3_GLIMP_H */

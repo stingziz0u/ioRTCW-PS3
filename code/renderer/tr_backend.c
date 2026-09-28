@@ -554,6 +554,14 @@ void RB_BeginDrawingView( void ) {
 		qglLoadMatrixf( s_flipMatrix );
 		qglClipPlane( GL_CLIP_PLANE0, plane2 );
 		qglEnable( GL_CLIP_PLANE0 );
+#ifdef __PS3__
+		{
+			// the RSX has no fixed-function clip plane: ps3gl clips in software
+			// and needs the WORLD-space plane (the eye-space one flips the sign)
+			extern void ps3gl_SetWorldClipPlane( float nx, float ny, float nz, float dist );
+			ps3gl_SetWorldClipPlane( plane[0], plane[1], plane[2], plane[3] );
+		}
+#endif
 	} else {
 		qglDisable( GL_CLIP_PLANE0 );
 	}

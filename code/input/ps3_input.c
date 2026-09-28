@@ -1,4 +1,8 @@
-/* ps3_input.c -- DS3 controller, USB keyboard, and USB mouse input. */
+/* ps3_input.c -- DS3 pad, USB keyboard and USB mouse for iortcw SP.
+ *
+ * Keyboard and mouse are IoQuake3-PS3's (Mayo1970) as-is. The pad section is
+ * rewritten for RTCW: its own default binds, the d-pad as extra buttons in
+ * game and as arrows in menus/console, no rumble, no OSK yet. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,115 +13,13 @@
 
 #include "qcommon/q_shared.h"
 #include "qcommon/qcommon.h"
-#include "keycodes.h"
+#include "client/keycodes.h"
 #include "../input/ps3_input.h"
-#include "../input/ps3_osk.h"
-
-extern void ps3_log(const char *msg);
+#include "sys/ps3_log.h"
 
 extern int Key_GetCatcher(void);
 extern void Key_SetBinding(int keynum, const char *binding);
 extern char *Key_GetBinding(int keynum);
-
-static void PS3_SetDefaultBind(int keynum, const char *binding)
-{
-    char *existing = Key_GetBinding(keynum);
-    if (!existing || !existing[0])
-        Key_SetBinding(keynum, binding);
-}
-
-#define STICK_CENTER    128
-#define STICK_DEADZONE  30
-#define STICK_RANGE     (128 - STICK_DEADZONE)
-#define MENU_CURSOR_SPEED  5.0f
-#define NUM_PS3_BUTTONS 18  /* 16 digital + 2 analog triggers */
-
-static padInfo  ps3_pad_info;
-static padData  ps3_pad_data;
-static qboolean ps3_pad_connected = qfalse;
-static qboolean ps3_quit_pressed  = qfalse;
-
-/* Port the active pad enumerates on -- BT/USB reconnects can land on a
- * different port than before, so this is re-resolved every frame, not hardcoded to 0. */
-static int ps3_active_pad_port = 0;
-
-static float ps3_cursor_accum_x = 0.0f;
-static float ps3_cursor_accum_y = 0.0f;
-static int ps3_btn_prev[NUM_PS3_BUTTONS];
-static int ps3_axis_prev[4];
-
-static cvar_t *ps3_rumbleEnable = NULL;
-static cvar_t *ps3_rumbleScale  = NULL;
-static int     s_rumbleExpiryMs = 0;
-static int     s_rumbleActive   = 0;
-
-void PS3_SetRumble(uint8_t large, uint8_t small_motor, int durationMs)
-{
-    if (!ps3_rumbleEnable || !ps3_rumbleEnable->integer) return;
-
-    float scale = ps3_rumbleScale ? ps3_rumbleScale->value : 1.0f;
-    if (scale < 0.0f) scale = 0.0f;
-    if (scale > 1.0f) scale = 1.0f;
-
-    int lg = (int)(large       * scale);
-    int sm = (int)(small_motor * scale);
-    if (lg > 255) lg = 255;
-    if (sm > 255) sm = 255;
-
-    padActParam act;
-    memset(&act, 0, sizeof(act));
-    act.large_motor = (uint8_t)lg;
-    act.small_motor = (sm > 0) ? 1 : 0;
-    ioPadSetActDirect(ps3_active_pad_port, &act);
-
-    int now    = Sys_Milliseconds();
-    int expiry = now + durationMs;
-    if (expiry > s_rumbleExpiryMs) s_rumbleExpiryMs = expiry;
-    s_rumbleActive = 1;
-}
-
-static void PS3_RumbleTick(void)
-{
-    if (!s_rumbleActive) return;
-    if (Sys_Milliseconds() < s_rumbleExpiryMs) return;
-
-    padActParam act;
-    memset(&act, 0, sizeof(act));
-    ioPadSetActDirect(ps3_active_pad_port, &act);
-    s_rumbleActive   = 0;
-    s_rumbleExpiryMs = 0;
-}
-
-static void PS3_RumbleStop(void)
-{
-    padActParam act;
-    memset(&act, 0, sizeof(act));
-    ioPadSetActDirect(ps3_active_pad_port, &act);
-    s_rumbleActive   = 0;
-    s_rumbleExpiryMs = 0;
-}
-
-/* Cross/Circle map to K_JOY*, plus K_ENTER/K_ESCAPE when UI active. */
-static const int q3_key_map[NUM_PS3_BUTTONS] = {
-    K_JOY1,             /* Cross */
-    K_JOY2,             /* Circle */
-    K_JOY3,             /* Square */
-    K_JOY4,             /* Triangle */
-    K_JOY5,             /* L1 */
-    K_JOY6,             /* R1 */
-    K_JOY7,             /* L2 */
-    K_JOY8,             /* R2 */
-    K_JOY9,             /* L3 */
-    K_JOY10,            /* R3 */
-    K_ESCAPE,           /* Start */
-    K_JOY11,            /* Select */
-    K_UPARROW,          /* D-Up */
-    K_DOWNARROW,        /* D-Down */
-    K_LEFTARROW,        /* D-Left */
-    K_RIGHTARROW,       /* D-Right */
-    K_JOY7,             /* L2 analog */
-    K_JOY8,             /* R2 analog */
-};
 
 /* -- USB Keyboard -- */
 
@@ -411,80 +313,140 @@ static void Mouse_Frame(qboolean syncOnly)
         Com_QueueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
 }
 
-/* ============================================================ */
+/* -- DS3 pad -- */
 
-/* Can't reuse BTN_CROSS -- those are padData bitfield member names. */
-#define PS3_BTN_IDX_CROSS     0
-#define PS3_BTN_IDX_CIRCLE    1
-#define PS3_BTN_IDX_TRIANGLE  3
-#define PS3_BTN_IDX_L3        8
-#define PS3_BTN_IDX_R3        9
-#define PS3_BTN_IDX_SELECT   11
+#define STICK_CENTER       128
+#define STICK_DEADZONE     30
+#define STICK_RANGE        (128 - STICK_DEADZONE)
+#define MENU_CURSOR_SPEED  5.0f
+#define TRIGGER_THRESHOLD  30
 
-#define TRIGGER_THRESHOLD 30
+enum {
+    PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE,
+    PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3,
+    PB_START, PB_SELECT,
+    PB_UP, PB_DOWN, PB_LEFT, PB_RIGHT,
+    PB_COUNT
+};
 
-static void read_buttons(const padData *pd, int out[NUM_PS3_BUTTONS])
+/* In game every button is a bindable key. */
+static const int pad_game_key[PB_COUNT] = {
+    K_JOY1, K_JOY2, K_JOY3, K_JOY4,      /* cross circle square triangle */
+    K_JOY5, K_JOY6, K_JOY7, K_JOY8,      /* L1 R1 L2 R2 */
+    K_JOY9, K_JOY10,                     /* L3 R3 */
+    K_ESCAPE, K_JOY11,                   /* start select */
+    K_JOY12, K_JOY13, K_JOY14, K_JOY15,  /* d-pad */
+};
+
+static padInfo  ps3_pad_info;
+static padData  ps3_pad_data;
+static int      ps3_active_pad_port = 0;
+static int      pad_down[PB_COUNT];      /* state as last reported to the engine */
+static int      pad_sent[PB_COUNT];      /* key sent for the press, released with it */
+static int      ps3_axis_prev[4];
+static float    ps3_cursor_accum_x, ps3_cursor_accum_y;
+static int      select_combo;
+
+static void PS3_SetDefaultBind(int keynum, const char *binding)
 {
-    out[0]  = pd->BTN_CROSS;
-    out[1]  = pd->BTN_CIRCLE;
-    out[2]  = pd->BTN_SQUARE;
-    out[3]  = pd->BTN_TRIANGLE;
-    out[4]  = pd->BTN_L1;
-    out[5]  = pd->BTN_R1;
-    out[6]  = pd->BTN_L2;
-    out[7]  = pd->BTN_R2;
-    out[8]  = pd->BTN_L3;
-    out[9]  = pd->BTN_R3;
-    out[10] = pd->BTN_START;
-    out[11] = pd->BTN_SELECT;
-    out[12] = pd->BTN_UP;
-    out[13] = pd->BTN_DOWN;
-    out[14] = pd->BTN_LEFT;
-    out[15] = pd->BTN_RIGHT;
+    char *existing = Key_GetBinding(keynum);
+    if (!existing || !existing[0])
+        Key_SetBinding(keynum, binding);
+}
 
-    /* OR with analog pressure so triggers work even with pressure mode off. */
-    out[16] = (out[6] || pd->PRE_L2 > TRIGGER_THRESHOLD) ? 1 : 0;
-    out[17] = (out[7] || pd->PRE_R2 > TRIGGER_THRESHOLD) ? 1 : 0;
+static void read_buttons(const padData *pd, int out[PB_COUNT])
+{
+    out[PB_CROSS]    = pd->BTN_CROSS;
+    out[PB_CIRCLE]   = pd->BTN_CIRCLE;
+    out[PB_SQUARE]   = pd->BTN_SQUARE;
+    out[PB_TRIANGLE] = pd->BTN_TRIANGLE;
+    out[PB_L1]       = pd->BTN_L1;
+    out[PB_R1]       = pd->BTN_R1;
+    /* OR with analog pressure so triggers work with pressure mode on or off. */
+    out[PB_L2]       = (pd->BTN_L2 || pd->PRE_L2 > TRIGGER_THRESHOLD) ? 1 : 0;
+    out[PB_R2]       = (pd->BTN_R2 || pd->PRE_R2 > TRIGGER_THRESHOLD) ? 1 : 0;
+    out[PB_L3]       = pd->BTN_L3;
+    out[PB_R3]       = pd->BTN_R3;
+    out[PB_START]    = pd->BTN_START;
+    out[PB_SELECT]   = pd->BTN_SELECT;
+    out[PB_UP]       = pd->BTN_UP;
+    out[PB_DOWN]     = pd->BTN_DOWN;
+    out[PB_LEFT]     = pd->BTN_LEFT;
+    out[PB_RIGHT]    = pd->BTN_RIGHT;
+}
+
+/* Key for a new press, depending on who has the input. Menus and the console
+ * get Enter/Escape/arrows; the game gets the bindable keys. */
+static int pad_key_for(int b, int catchers)
+{
+    int menu = catchers & (KEYCATCH_UI | KEYCATCH_CGAME | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE);
+
+    if (menu) {
+        switch (b) {
+        case PB_CROSS:  return K_ENTER;
+        case PB_CIRCLE: return K_ESCAPE;
+        case PB_UP:     return K_UPARROW;
+        case PB_DOWN:   return K_DOWNARROW;
+        case PB_LEFT:   return K_LEFTARROW;
+        case PB_RIGHT:  return K_RIGHTARROW;
+        case PB_L1:     return K_PGUP;      /* console scrollback */
+        case PB_R1:     return K_PGDN;
+        default: break;
+        }
+    }
+    return pad_game_key[b];
+}
+
+static void pad_release_all(void)
+{
+    int b;
+
+    for (b = 0; b < PB_COUNT; b++) {
+        if (pad_down[b] && pad_sent[b])
+            Com_QueueEvent(0, SE_KEY, pad_sent[b], qfalse, 0, NULL);
+        pad_down[b] = 0;
+        pad_sent[b] = 0;
+    }
+    for (b = 0; b < 4; b++) {
+        if (ps3_axis_prev[b])
+            Com_QueueEvent(0, SE_JOYSTICK_AXIS, b == 2 ? 4 : b == 3 ? 3 : b, 0, 0, NULL);
+        ps3_axis_prev[b] = 0;
+    }
 }
 
 void PS3_Input_Init(void)
 {
     ioPadInit(7);
-
     /* PRE_L2/PRE_R2 read 0 unless pressure mode is on. */
     ioPadSetPressMode(0, PAD_PRESS_MODE_ON);
 
-    memset(ps3_btn_prev, 0, sizeof(ps3_btn_prev));
+    memset(pad_down, 0, sizeof(pad_down));
+    memset(pad_sent, 0, sizeof(pad_sent));
     memset(ps3_axis_prev, 0, sizeof(ps3_axis_prev));
-    ps3_pad_connected = qfalse;
-    ps3_quit_pressed = qfalse;
-    ps3_cursor_accum_x = 0.0f;
-    ps3_cursor_accum_y = 0.0f;
-    s_rumbleActive   = 0;
-    s_rumbleExpiryMs = 0;
+    ps3_cursor_accum_x = ps3_cursor_accum_y = 0.0f;
 
     KB_Init();
     Mouse_Init();
 
-    printf("[ps3] Input initialized (pad + keyboard + mouse)\n");
+    ps3_log("[input] pad + USB keyboard + USB mouse initialized");
 }
 
 void PS3_Input_Shutdown(void)
 {
-    PS3_RumbleStop();
     ioPadEnd();
     KB_Shutdown();
     Mouse_Shutdown();
 }
 
-/* Sticky port: keep the current one if still connected (avoids hopping between
- * paired pads), else pick the first connected. Must run every frame -- BT sleep/USB replug re-enumerates. */
+/* Sticky port: keep the current one while it is connected, else take the
+ * first connected one. Runs every frame: BT sleep / USB replug re-enumerate. */
 static void PS3_SelectActivePadPort(void)
 {
+    int i;
+
     if (ps3_pad_info.status[ps3_active_pad_port])
         return;
-
-    for (int i = 0; i < 7; i++) {
+    for (i = 0; i < 7; i++) {
         if (ps3_pad_info.status[i]) {
             ps3_active_pad_port = i;
             return;
@@ -494,275 +456,149 @@ static void PS3_SelectActivePadPort(void)
 
 void PS3_Input_Frame(void)
 {
-    int btn_cur[NUM_PS3_BUTTONS];
-    int i;
-    qboolean osk_active = PS3_OSK_IsActive();
+    int cur[PB_COUNT];
+    int catchers, in_menu, b;
 
-    /* Always poll keyboard/mouse to keep state in sync even during OSK. */
-    KB_Frame(osk_active);
-    Mouse_Frame(osk_active);
-
-    /* OSK owns the pad while open -- only keep edge state in sync. */
-    if (osk_active) {
-        ioPadGetInfo(&ps3_pad_info);
-        PS3_SelectActivePadPort();
-        if (ps3_pad_info.status[ps3_active_pad_port] &&
-            ioPadGetData(ps3_active_pad_port, &ps3_pad_data) == 0) {
-            read_buttons(&ps3_pad_data, ps3_btn_prev);
-        }
-        return;
-    }
+    KB_Frame(qfalse);
+    Mouse_Frame(qfalse);
 
     ioPadGetInfo(&ps3_pad_info);
     PS3_SelectActivePadPort();
-
-    if (ps3_pad_info.status[ps3_active_pad_port] == 0) {
-        ps3_pad_connected = qfalse;
+    if (!ps3_pad_info.status[ps3_active_pad_port]) {
+        pad_release_all();
         return;
     }
-    ps3_pad_connected = qtrue;
-
+    /* Keep going on len == 0: ps3_pad_data still holds the last values, and
+     * skipping would freeze the menu cursor accumulator. */
     if (ioPadGetData(ps3_active_pad_port, &ps3_pad_data) != 0)
         return;
 
-    /* Do NOT bail on len==0 -- ps3_pad_data still holds the last poll's values.
-     * Skip the accumulator here and the menu cursor freezes solid at 60fps. */
+    read_buttons(&ps3_pad_data, cur);
 
-    PS3_RumbleTick();
+    catchers = Key_GetCatcher();
+    in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
 
-    read_buttons(&ps3_pad_data, btn_cur);
-
-    int catchers = Key_GetCatcher();
-    int in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
-    int in_text = (catchers & (KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
-
-    /* Clear ui_ime_target on menu open to prevent stale field names from triggering OSK. */
-    static int prev_in_menu = 0;
-    if (in_menu && !prev_in_menu)
-        Cvar_Set("ui_ime_target", "");
-    prev_in_menu = in_menu;
-
-    int triangle_pressed = (btn_cur[PS3_BTN_IDX_TRIANGLE] &&
-                            !ps3_btn_prev[PS3_BTN_IDX_TRIANGLE]);
-    int triangle_consumed = 0;
-
-    /* SELECT+TRIANGLE: toggle console */
-    if (triangle_pressed && btn_cur[PS3_BTN_IDX_SELECT]) {
+    /* SELECT is a modifier: SELECT + TRIANGLE opens the console. On its own
+     * it acts on release (a tap), so the combo never triggers its binding. */
+    if (cur[PB_SELECT] && !pad_down[PB_SELECT])
+        select_combo = 0;
+    if (cur[PB_SELECT] && cur[PB_TRIANGLE] && !pad_down[PB_TRIANGLE]) {
         Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
         Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
-        triangle_consumed = 1;
+        pad_down[PB_TRIANGLE] = 1;
+        pad_sent[PB_TRIANGLE] = 0;      /* swallowed: no release to send */
+        select_combo = 1;
     }
-
-    int cross_pressed = (btn_cur[PS3_BTN_IDX_CROSS] &&
-                         !ps3_btn_prev[PS3_BTN_IDX_CROSS]);
-    int cross_consumed = 0;
-
-    if (cross_pressed) {
-        if (btn_cur[PS3_BTN_IDX_SELECT] && !in_menu && !in_text) {
-            /* SELECT+CROSS: open chat */
-            Cbuf_ExecuteText(EXEC_APPEND, "messagemode\n");
-            cross_consumed = 1;
-        } else if (in_text) {
-            /* CROSS in console: prepend '/' so result is treated as a command.
-             * CROSS in chat: no slash, text is the message body. */
-            qboolean in_console = (catchers & KEYCATCH_CONSOLE) ? qtrue : qfalse;
-            PS3_OSK_Open(in_console ? "Console Command" : "Chat", 128, NULL, qtrue, in_console, qfalse);
-            cross_consumed = 1;
-        } else if (in_menu) {
-            /* Open OSK if ui_ime_target names a field; skip on empty or "donothing". */
-            const char *ime = Cvar_VariableString("ui_ime_target");
-            if (ime && ime[0] && strcmp(ime, "donothing") != 0) {
-                PS3_OSK_Open("Enter text", 80, NULL, qfalse, qfalse, qtrue);
-                cross_consumed = 1;
-            }
+    if (cur[PB_SELECT] != pad_down[PB_SELECT]) {
+        if (!cur[PB_SELECT] && !select_combo) {
+            int key = pad_key_for(PB_SELECT, catchers);
+            Com_QueueEvent(0, SE_KEY, key, qtrue, 0, NULL);
+            Com_QueueEvent(0, SE_KEY, key, qfalse, 0, NULL);
         }
+        pad_down[PB_SELECT] = cur[PB_SELECT];
+        pad_sent[PB_SELECT] = 0;
     }
 
-    int circle_pressed = (btn_cur[PS3_BTN_IDX_CIRCLE] &&
-                          !ps3_btn_prev[PS3_BTN_IDX_CIRCLE]);
-    int circle_consumed = 0;
-
-    /* CIRCLE closes the console when it's open */
-    if (circle_pressed && !circle_consumed && (catchers & KEYCATCH_CONSOLE)) {
-        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
-        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
-        circle_consumed = 1;
-    }
-
-    /* L3+R3 (edge-detected): toggle rumble enable. */
-    if (btn_cur[PS3_BTN_IDX_L3] && btn_cur[PS3_BTN_IDX_R3] &&
-        (!ps3_btn_prev[PS3_BTN_IDX_L3] || !ps3_btn_prev[PS3_BTN_IDX_R3])) {
-        int on = ps3_rumbleEnable ? !ps3_rumbleEnable->integer : 1;
-        Cvar_SetValue("ps3_rumbleEnable", on ? 1.0f : 0.0f);
-        Com_Printf("Rumble: %s\n", on ? "ON" : "OFF");
-        if (on) {
-            PS3_SetRumble(200, 1, 200);
-        } else {
-            PS3_RumbleStop();
+    for (b = 0; b < PB_COUNT; b++) {
+        if (b == PB_SELECT || cur[b] == pad_down[b])
+            continue;
+        if (cur[b]) {
+            /* the key is picked at press time and released as the same key,
+             * so a menu closing mid-press never leaves a key stuck down */
+            pad_sent[b] = pad_key_for(b, catchers);
+            Com_QueueEvent(0, SE_KEY, pad_sent[b], qtrue, 0, NULL);
+        } else if (pad_sent[b]) {
+            Com_QueueEvent(0, SE_KEY, pad_sent[b], qfalse, 0, NULL);
         }
-        ps3_btn_prev[PS3_BTN_IDX_L3] = 1;
-        ps3_btn_prev[PS3_BTN_IDX_R3] = 1;
-        goto skip_buttons;
+        pad_down[b] = cur[b];
     }
-
-    for (i = 0; i < NUM_PS3_BUTTONS; i++) {
-        /* Digital L2/R2 are handled via the analog-threshold indices 16/17. */
-        if (i == 6 || i == 7) continue;
-
-        int cur  = btn_cur[i] ? 1 : 0;
-        int prev = ps3_btn_prev[i];
-
-        if (cur != prev) {
-            if (i == PS3_BTN_IDX_TRIANGLE && triangle_consumed && cur) {
-                ps3_btn_prev[i] = cur;
-                continue;
-            }
-
-            if (i == PS3_BTN_IDX_CROSS && cross_consumed && cur) {
-                ps3_btn_prev[i] = cur;
-                continue;
-            }
-
-            if (i == PS3_BTN_IDX_CIRCLE && circle_consumed && cur) {
-                ps3_btn_prev[i] = cur;
-                continue;
-            }
-
-            if (i == PS3_BTN_IDX_CROSS && in_menu) {
-                Com_QueueEvent(0, SE_KEY, K_ENTER,
-                               cur ? qtrue : qfalse, 0, NULL);
-            } else if (i == PS3_BTN_IDX_CIRCLE && in_menu) {
-                Com_QueueEvent(0, SE_KEY, K_ESCAPE,
-                               cur ? qtrue : qfalse, 0, NULL);
-            } else {
-                Com_QueueEvent(0, SE_KEY, q3_key_map[i],
-                               cur ? qtrue : qfalse, 0, NULL);
-            }
-        }
-        ps3_btn_prev[i] = cur;
-    }
-    skip_buttons:;
 
     {
-        int lx_raw = (int)ps3_pad_data.ANA_L_H - STICK_CENTER;
-        int ly_raw = (int)ps3_pad_data.ANA_L_V - STICK_CENTER;
-        int rx_raw = (int)ps3_pad_data.ANA_R_H - STICK_CENTER;
-        int ry_raw = (int)ps3_pad_data.ANA_R_V - STICK_CENTER;
+        int lx = (int)ps3_pad_data.ANA_L_H - STICK_CENTER;
+        int ly = (int)ps3_pad_data.ANA_L_V - STICK_CENTER;
+        int rx = (int)ps3_pad_data.ANA_R_H - STICK_CENTER;
+        int ry = (int)ps3_pad_data.ANA_R_V - STICK_CENTER;
+        int axis[4], engine_axis[4] = { 0, 1, 4, 3 };
 
-        if (abs(lx_raw) < STICK_DEADZONE) lx_raw = 0;
-        if (abs(ly_raw) < STICK_DEADZONE) ly_raw = 0;
-        if (abs(rx_raw) < STICK_DEADZONE) rx_raw = 0;
-        if (abs(ry_raw) < STICK_DEADZONE) ry_raw = 0;
+        if (abs(lx) < STICK_DEADZONE) lx = 0;
+        if (abs(ly) < STICK_DEADZONE) ly = 0;
+        if (abs(rx) < STICK_DEADZONE) rx = 0;
+        if (abs(ry) < STICK_DEADZONE) ry = 0;
 
         if (in_menu) {
-            if (lx_raw != 0 || ly_raw != 0) {
-                float fx = (float)lx_raw / (float)STICK_RANGE;
-                float fy = (float)ly_raw / (float)STICK_RANGE;
+            /* left stick drives the menu cursor */
+            if (lx || ly) {
+                float fx = (float)lx / (float)STICK_RANGE;
+                float fy = (float)ly / (float)STICK_RANGE;
+                int dx, dy;
 
-                if (fx >  1.0f) fx =  1.0f;
+                if (fx > 1.0f) fx = 1.0f;
                 if (fx < -1.0f) fx = -1.0f;
-                if (fy >  1.0f) fy =  1.0f;
+                if (fy > 1.0f) fy = 1.0f;
                 if (fy < -1.0f) fy = -1.0f;
-
-                /* Linear only -- a squared curve underflows the accumulator to 0 and stutters. */
-                float ax = fx * MENU_CURSOR_SPEED;
-                float ay = fy * MENU_CURSOR_SPEED;
-
-                ps3_cursor_accum_x += ax;
-                ps3_cursor_accum_y += ay;
-
-                int dx = (int)ps3_cursor_accum_x;
-                int dy = (int)ps3_cursor_accum_y;
+                /* linear: a squared curve underflows the accumulator */
+                ps3_cursor_accum_x += fx * MENU_CURSOR_SPEED;
+                ps3_cursor_accum_y += fy * MENU_CURSOR_SPEED;
+                dx = (int)ps3_cursor_accum_x;
+                dy = (int)ps3_cursor_accum_y;
                 ps3_cursor_accum_x -= (float)dx;
                 ps3_cursor_accum_y -= (float)dy;
-
-                if (dx != 0 || dy != 0)
+                if (dx || dy)
                     Com_QueueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
             }
-        } else {
-            /* Scaled to Q3's +/-32K joystick axis range. */
-            int jlx = lx_raw * 256;
-            int jly = ly_raw * 256;
-            int jrx = rx_raw * 256;
-            int jry = ry_raw * 256;
+            lx = ly = rx = ry = 0;      /* the player stops moving in menus */
+        }
 
-            if (jlx != ps3_axis_prev[0]) {
-                Com_QueueEvent(0, SE_JOYSTICK_AXIS, 0, jlx, 0, NULL);
-                ps3_axis_prev[0] = jlx;
-            }
-            if (jly != ps3_axis_prev[1]) {
-                Com_QueueEvent(0, SE_JOYSTICK_AXIS, 1, jly, 0, NULL);
-                ps3_axis_prev[1] = jly;
-            }
-            if (jrx != ps3_axis_prev[2]) {
-                Com_QueueEvent(0, SE_JOYSTICK_AXIS, 4, jrx, 0, NULL);
-                ps3_axis_prev[2] = jrx;
-            }
-            if (jry != ps3_axis_prev[3]) {
-                Com_QueueEvent(0, SE_JOYSTICK_AXIS, 3, jry, 0, NULL);
-                ps3_axis_prev[3] = jry;
+        /* scaled to the engine's +/-32K joystick axis range */
+        axis[0] = lx * 256;
+        axis[1] = ly * 256;
+        axis[2] = rx * 256;
+        axis[3] = ry * 256;
+        for (b = 0; b < 4; b++) {
+            if (axis[b] != ps3_axis_prev[b]) {
+                Com_QueueEvent(0, SE_JOYSTICK_AXIS, engine_axis[b], axis[b], 0, NULL);
+                ps3_axis_prev[b] = axis[b];
             }
         }
     }
-
-    /* Quit combo: Start + Select. */
-    if (btn_cur[10] && btn_cur[11]) {
-        ps3_quit_pressed = qtrue;
-    }
 }
 
-qboolean PS3_Input_QuitPressed(void)
-{
-    return ps3_quit_pressed;
-}
-
+/* Called by the renderer's GLimp_Init (after the configs are executed). */
 void IN_Init(void *windowData)
 {
     (void)windowData;
 
-    PS3_SetDefaultBind(K_JOY1,  "+moveup");      /* Cross    = jump */
-    PS3_SetDefaultBind(K_JOY2,  "+movedown");    /* Circle   = crouch */
-    PS3_SetDefaultBind(K_JOY3,  "weapprev");     /* Square */
-    PS3_SetDefaultBind(K_JOY4,  "weapnext");     /* Triangle */
-    PS3_SetDefaultBind(K_JOY5,  "+moveleft");    /* L1 */
-    PS3_SetDefaultBind(K_JOY6,  "+moveright");   /* R1 */
-    PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 */
-    PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 */
-    PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 */
-#ifdef ELITEFORCE
-    PS3_SetDefaultBind(K_JOY10, "+info");        /* R3 - EF scoreboard cvar */
-    PS3_SetDefaultBind(K_JOY11, "+info");        /* Select - EF scoreboard cvar */
-#else
-    PS3_SetDefaultBind(K_JOY10, "+scores");      /* R3 */
-    PS3_SetDefaultBind(K_JOY11, "+scores");      /* Select */
-#endif
-
-    ps3_rumbleEnable = Cvar_Get("ps3_rumbleEnable", "1",   CVAR_ARCHIVE);
-    ps3_rumbleScale  = Cvar_Get("ps3_rumbleScale",  "1.0", CVAR_ARCHIVE);
+    PS3_SetDefaultBind(K_JOY1,  "+moveup");     /* cross     jump */
+    PS3_SetDefaultBind(K_JOY2,  "+movedown");   /* circle    crouch */
+    PS3_SetDefaultBind(K_JOY3,  "+reload");     /* square */
+    PS3_SetDefaultBind(K_JOY4,  "+activate");   /* triangle  use */
+    PS3_SetDefaultBind(K_JOY5,  "weapprev");    /* L1 */
+    PS3_SetDefaultBind(K_JOY6,  "weapnext");    /* R1 */
+    PS3_SetDefaultBind(K_JOY7,  "weapalt");     /* L2        alt fire / scope */
+    PS3_SetDefaultBind(K_JOY8,  "+attack");     /* R2 */
+    PS3_SetDefaultBind(K_JOY9,  "+sprint");     /* L3 */
+    PS3_SetDefaultBind(K_JOY10, "+zoom");       /* R3        binoculars */
+    PS3_SetDefaultBind(K_JOY11, "notebook");    /* select */
+    PS3_SetDefaultBind(K_JOY12, "+kick");       /* d-up */
+    PS3_SetDefaultBind(K_JOY13, "+useitem");    /* d-down */
+    PS3_SetDefaultBind(K_JOY14, "+leanleft");   /* d-left */
+    PS3_SetDefaultBind(K_JOY15, "+leanright");  /* d-right */
 
     Cvar_Set("in_joystick", "1");
-    Cvar_Set("in_joystickUseAnalog", "1");
     Cvar_Set("j_pitch_axis", "3");
-    Cvar_Set("j_yaw_axis",   "4");
+    Cvar_Set("j_yaw_axis", "4");
     Cvar_Set("j_forward_axis", "1");
-    Cvar_Set("j_side_axis",  "0");
-    Cvar_Set("j_pitch",  "0.011");
-    Cvar_Set("j_yaw",   "-0.011");
+    Cvar_Set("j_side_axis", "0");
+    Cvar_Set("j_pitch", "0.011");
+    Cvar_Set("j_yaw", "-0.011");
     Cvar_Set("j_forward", "-0.25");
-    Cvar_Set("j_side",    "0.25");
+    Cvar_Set("j_side", "0.25");
 
     ps3_log("IN_Init: default DS3 binds set");
 }
 
 void IN_Frame(void) {}
 
-void IN_Shutdown(void)
-{
-    PS3_Input_Shutdown();
-}
+void IN_Shutdown(void) {}
 
-void IN_Restart(void)
-{
-    PS3_Input_Shutdown();
-    PS3_Input_Init();
-}
+void IN_Restart(void) {}

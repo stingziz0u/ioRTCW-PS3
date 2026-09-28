@@ -1,4 +1,5 @@
-/* ps3_snd.c -- PSL1GHT libaudio backend for ioQ3's software mixer. */
+/* ps3_snd.c -- PSL1GHT libaudio backend (SNDDMA_*) for the engine's mixer.
+ * From IoQuake3-PS3 (Mayo1970). The S_* dispatch is iortcw's own snd_main.c. */
 /* Compiled with -maltivec (per-file Makefile rule) for VMX audio conversion. */
 
 #include <stdio.h>
@@ -15,11 +16,8 @@
 #include "qcommon/q_shared.h"
 #include "qcommon/qcommon.h"
 #include "client/snd_local.h"
-#include "../audio/ps3_snd.h"
 
-extern void ps3_log(const char *msg);
-extern void S_Base_StartBackgroundTrack(const char *intro, const char *loop);
-extern void S_Base_StopBackgroundTrack(void);
+#include "sys/ps3_log.h"
 
 /* Ring buffer: ~85 ms at 48 kHz. Mixer writes PCM, audio thread reads. */
 #define PS3_AUDIO_RATE       48000
@@ -298,134 +296,3 @@ int  SNDDMA_AvailableCaptureSamples(void) { return 0; }
 void SNDDMA_Capture(int samples, byte *data) { (void)samples; (void)data; }
 void SNDDMA_StopCapture(void) {}
 void SNDDMA_MasterGain(float val) { (void)val; }
-
-/* snd_main.c isn't compiled on PS3 -- dispatch goes straight to S_Base_*. */
-extern void S_Update_(void);
-extern void S_Base_Update(void);
-extern void S_Base_Shutdown(void);
-extern void S_Base_StartSound(vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfx);
-extern void S_Base_StartLocalSound(sfxHandle_t sfx, int channelNum);
-extern void S_Base_StopAllSounds(void);
-extern void S_Base_StopLoopingSound(int entityNum);
-extern void S_Base_ClearLoopingSounds(qboolean killall);
-extern void S_Base_AddLoopingSound(int entityNum, const vec3_t origin, const vec3_t velocity, sfxHandle_t sfx);
-extern void S_Base_AddRealLoopingSound(int entityNum, const vec3_t origin, const vec3_t velocity, sfxHandle_t sfx);
-extern void S_Base_UpdateEntityPosition(int entityNum, const vec3_t origin);
-extern void S_Base_Respatialize(int entityNum, const vec3_t origin, vec3_t axis[3], int inwater);
-extern sfxHandle_t S_Base_RegisterSound(const char *sample, qboolean compressed);
-extern void S_Base_BeginRegistration(void);
-extern void S_Base_ClearSoundBuffer(void);
-extern void S_Base_DisableSounds(void);
-extern void S_Base_RawSamples(int stream, int samples, int rate, int width, int s_channels, const byte *data, float volume, int entityNum);
-
-extern void S_CodecInit(void);
-cvar_t *s_volume;
-cvar_t *s_muted;
-cvar_t *s_musicVolume;
-cvar_t *s_doppler;
-
-static soundInterface_t s_snd_if;
-
-/* snd_main.c isn't compiled on PS3, so its console commands (play/music/stopmusic/etc)
- * MUST be hand-registered here -- miss one and it gets forwarded to the server as chat. */
-static void S_Play_f(void)
-{
-    int i, c;
-    sfxHandle_t h;
-
-    c = Cmd_Argc();
-    if (c < 2)
-        return;
-
-    for (i = 1; i < c; i++) {
-        h = S_Base_RegisterSound(Cmd_Argv(i), qfalse);
-        if (h)
-            S_Base_StartLocalSound(h, CHAN_LOCAL_SOUND);
-    }
-}
-
-static void S_Music_f(void)
-{
-    int c = Cmd_Argc();
-    if (c == 2)
-        S_Base_StartBackgroundTrack(Cmd_Argv(1), NULL);
-    else if (c == 3)
-        S_Base_StartBackgroundTrack(Cmd_Argv(1), Cmd_Argv(2));
-    else
-        Com_Printf("Usage: music <musicfile> [loopfile]\n");
-}
-
-static void S_StopMusic_f(void)
-{
-    S_Base_StopBackgroundTrack();
-}
-
-static void S_List_f(void)
-{
-    if (s_snd_if.SoundList)
-        s_snd_if.SoundList();
-}
-
-static void S_Info_f(void)
-{
-    if (s_snd_if.SoundInfo)
-        s_snd_if.SoundInfo();
-}
-
-void S_Init(void)
-{
-    s_volume      = Cvar_Get("s_volume",      "0.8",  CVAR_ARCHIVE);
-    s_muted       = Cvar_Get("s_muted",       "0",    CVAR_ROM);
-    s_musicVolume = Cvar_Get("s_musicVolume", "0.25", CVAR_ARCHIVE);
-    s_doppler     = Cvar_Get("s_doppler",     "1",    CVAR_ARCHIVE);
-
-    S_CodecInit();
-
-    Com_Memset(&s_snd_if, 0, sizeof(s_snd_if));
-    S_Base_Init(&s_snd_if);
-
-    Cmd_AddCommand("play",      S_Play_f);
-    Cmd_AddCommand("music",     S_Music_f);
-    Cmd_AddCommand("stopmusic", S_StopMusic_f);
-    Cmd_AddCommand("s_list",    S_List_f);
-    Cmd_AddCommand("s_stop",    S_Base_StopAllSounds);
-    Cmd_AddCommand("s_info",   S_Info_f);
-}
-
-void S_Shutdown(void)
-{
-    Cmd_RemoveCommand("play");
-    Cmd_RemoveCommand("music");
-    Cmd_RemoveCommand("stopmusic");
-    Cmd_RemoveCommand("s_list");
-    Cmd_RemoveCommand("s_stop");
-    Cmd_RemoveCommand("s_info");
-    if (s_snd_if.Shutdown)
-        s_snd_if.Shutdown();
-    SNDDMA_Shutdown();
-    Com_Memset(&s_snd_if, 0, sizeof(s_snd_if));
-}
-
-void        S_Update(void)                                             { S_Base_Update(); }
-void        S_BeginRegistration(void)                                  { S_Base_BeginRegistration(); }
-sfxHandle_t S_RegisterSound(const char *n, qboolean comp)             { return S_Base_RegisterSound(n, comp); }
-void        S_StartSound(vec3_t o,int n,int c,sfxHandle_t h)          { S_Base_StartSound(o,n,c,h); }
-void        S_StartLocalSound(sfxHandle_t h,int c)                    { S_Base_StartLocalSound(h,c); }
-void        S_StopAllSounds(void)                                      { S_Base_StopAllSounds(); }
-void        S_StopLoopingSound(int e)                                  { S_Base_StopLoopingSound(e); }
-void        S_ClearLoopingSounds(qboolean k)                           { S_Base_ClearLoopingSounds(k); }
-void        S_AddLoopingSound(int n,const vec3_t o,const vec3_t v,sfxHandle_t h)     { S_Base_AddLoopingSound(n,o,v,h); }
-void        S_AddRealLoopingSound(int n,const vec3_t o,const vec3_t v,sfxHandle_t h) { S_Base_AddRealLoopingSound(n,o,v,h); }
-void        S_UpdateEntityPosition(int n,const vec3_t o)              { S_Base_UpdateEntityPosition(n,o); }
-void        S_Respatialize(int n,const vec3_t o,vec3_t ax[3],int i)   { S_Base_Respatialize(n,o,ax,i); }
-void        S_ClearSoundBuffer(void)                                   { S_Base_ClearSoundBuffer(); }
-void        S_DisableSounds(void)                                      { S_Base_DisableSounds(); }
-void        S_StartBackgroundTrack(const char *i,const char *l)       { S_Base_StartBackgroundTrack(i,l); }
-void        S_StopBackgroundTrack(void)                                { S_Base_StopBackgroundTrack(); }
-void        S_RawSamples(int stream,int samples,int rate,int width,int channels,const byte *d,float v,int e)
-                                                                       { S_Base_RawSamples(stream,samples,rate,width,channels,d,v,e); }
-
-void PS3_Snd_Shutdown(void)
-{
-    SNDDMA_Shutdown();
-}

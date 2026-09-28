@@ -56,7 +56,8 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
 - `make STAGE=1`: headless (motor + server + qagame, sin video/input/audio).
   Recorre todos los `maps/*.bsp`, loguea el hunk que usa cada uno y sale.
   PKG: `iortcw-ps3-stage1.pkg`.
-- `make` (STAGE=2, juego completo): todavía no existe.
+- `make` (STAGE=2): el juego. PKG `iortcw-ps3-<VERSION>.pkg`. Todavía sin
+  niebla, sin Video Settings (dibuja directo a 720p) y sin OSK.
 - `DEBUG=1` en cualquiera. Cada variante tiene su `obj/<variante>`: no hace
   falta `make clean` al cambiar.
 - `make getlog PS3IP=…` baja `USRDIR/iortcw-ps3.log` por FTP.
@@ -74,10 +75,33 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
 - Estático de los módulos (medido): qagame ~6.6 MB de bss, cgame ~17 MB
   (`cgModelInfo` 5.6 MB, `cg_entities` 4.1 MB), ui ~2.5 MB. Candidatos a
   achicar si falta memoria.
+- **Stage 1 en hardware (28 sep 2026)**: 31 de 32 mapas cargan (norway es un
+  mapa de prueba sin terminar, su script falla igual en PC). Memoria libre al
+  arrancar el stage 1: ~191 MB. Hunk del lado servidor: 20–31 MB por mapa
+  (máx. swf 30.4 MB, forest 31.7 MB con el high). Carga 1–3 s por mapa. Sin
+  fugas en 31 cambios de mapa (libre estable 36–42 MB con hunk de 143).
 - Stack del hilo del juego: 2 MB. El peor frame medido
   (`-fstack-usage`) es `CM_GeneratePatchCollide`, 325 KB.
 - `ps3_setjmp.S` + `sys/include/setjmp.h` (de Mayo): el setjmp de newlib pisa
   el stack. Nunca sacarlos.
+
+- **Memoria del stage 2** (decisiones que la hacen entrar):
+  - `MAX_RAW_STREAMS 13` (`snd_local.h`): música + 12 voces como el RTCW
+    original. El valor de iortcw (257, pensado para VoIP) eran 32 MB de bss.
+  - Buffer IO del RSX de 8 MB (`ps3_glimp.c`), no 32: ps3gl tiene todo en la
+    memoria local del RSX y del IO solo usa el command buffer de 1 MB.
+  - `com_soundMegs` con tope `PS3_MAX_COMSOUNDMEGS` = 6 (18 MB) en
+    `snd_mem.c`; el default de iortcw (32) pedía ~100 MB.
+  - Hunk calculado al arrancar con la memoria libre medida (`ps3_main.c`).
+- EBOOT del stage 2: ~48 MB (bss ~42 MB, mayormente los módulos del juego).
+- **TOC**: botlib, server, client, jpeg, splines y zlib van con
+  `-mminimal-toc` (`MINTOC_DIRS` en el Makefile). Sin eso el `.got` llegaba a
+  0xfa80 (1,4 KB del límite); con eso, 0x87c0.
+- GL: `qgl_ps3.c` pone un stub que loguea "not implemented" en cada entrada
+  GL y encima conecta las de ps3gl. Si falta algo, sale en el log.
+- Pad (`ps3_input.c`): en juego todo es tecla bindeable (`K_JOY1..15`); en
+  menús/consola X = Enter, O = Escape, cruceta = flechas, stick izq. = cursor.
+  SELECT solo = notebook (al soltar); SELECT+TRIÁNGULO = consola.
 
 ## Restricciones heredadas de IoQuake3-PS3 (no romper)
 

@@ -6,7 +6,9 @@
  * STAGE 1 (make STAGE=1): headless. Engine + server + linked-in qagame, no
  * video/input/sound. Loads every .bsp in maps/ one after another, logs
  * how much hunk each one needs, and quits. Validates the engine, endianness,
- * the pk3 filesystem and the game module before any renderer work. */
+ * the pk3 filesystem and the game module before any renderer work.
+ *
+ * STAGE 2 (make): the game. RSX + ps3gl, pad, audio, qagame/cgame/ui. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +25,10 @@
 #include "sys/sys_local.h"
 
 #include "ps3_log.h"
+#if PS3_STAGE >= 2
+#include "ps3_glimp.h"
+#include "../input/ps3_input.h"
+#endif
 
 #ifndef PS3_STAGE
 #define PS3_STAGE 2
@@ -52,6 +58,28 @@ int PS3_Running(void)
 {
     return ps3_running;
 }
+
+#if PS3_STAGE >= 2
+extern void (*PS3_ExitHook)(int code);
+extern void SNDDMA_Shutdown(void);
+
+/* Every way out (quit, XMB exit, fatal error) goes through here: the audio
+ * thread and the RSX must be stopped before the process exits, or the
+ * console can hang or reboot. */
+static void PS3_Shutdown(int code)
+{
+    static int done;
+
+    if (done)
+        return;
+    done = 1;
+    PS3_Logf("[8] shutdown (code %d)", code);
+    SNDDMA_Shutdown();
+    PS3_Input_Shutdown();
+    PS3_RSX_Shutdown();
+    ps3_log("[8] shutdown done");
+}
+#endif
 
 /* [3] USRDIR must be writable: config, saves and this log live there. */
 static qboolean PS3_CheckUsrdir(void)
@@ -193,7 +221,33 @@ static void PS3_GameThread(void *arg)
     }
     ps3_log("[4] game data found");
 
+#if PS3_STAGE >= 2
+    PS3_Input_Init();
+    ps3_log("[5] pad initialized");
+    PS3_RSX_Init();
+    PS3_ExitHook = PS3_Shutdown;
+    ps3_log("[6] RSX initialized");
+#endif
+
     Sys_PlatformInit();
+
+#if PS3_STAGE >= 2
+    /* Hunk from what is really free once the RSX IO buffer is taken: minus
+     * the zone, the sound cache and a margin for the renderer's mallocs. */
+    {
+        int freeMB = (int)PS3_FreeUserMemMB();
+        int soundMB = (PS3_MAX_COMSOUNDMEGS * 1536 * 2064) >> 20;
+        int hunkMB = freeMB - PS3_DEF_COMZONEMEGS - soundMB - 24;
+
+        if (hunkMB > 128)
+            hunkMB = 128;
+        if (hunkMB < PS3_MIN_COMHUNKMEGS)
+            hunkMB = PS3_MIN_COMHUNKMEGS;
+        PS3_Logf("[6] free ~%d MB -> com_hunkMegs %d (zone %d, sound %d)",
+                 freeMB, hunkMB, PS3_DEF_COMZONEMEGS, soundMB);
+        Com_sprintf(ps3_hunkarg, sizeof(ps3_hunkarg), "+set com_hunkMegs %d ", hunkMB);
+    }
+#endif
 
 #if PS3_STAGE == 1
     /* Measure, don't guess: give the hunk what is free minus the zone and a
@@ -220,11 +274,23 @@ static void PS3_GameThread(void *arg)
         "+set dedicated 1 "
         "+set sv_fps 20 "
         "%s"
+#else
+        "%s"
+        "+set com_zoneMegs " XSTRING(PS3_DEF_COMZONEMEGS) " "
+        "+set com_soundMegs " XSTRING(PS3_MAX_COMSOUNDMEGS) " "
+        "+set r_mode -1 "
+        "+set r_customwidth %d +set r_customheight %d "
+        "+set r_ext_compressed_textures 0 "
+        "+set r_primitives 2 "
+        "+set r_flares 0 "
+        "+set r_drawSun 0 "
+        "+set com_maxfps 60 "
 #endif
         "+set vm_game 0 +set vm_cgame 0 +set vm_ui 0 "
         "+set com_logfile 0"
-#if PS3_STAGE == 1
         , ps3_hunkarg
+#if PS3_STAGE >= 2
+        , PS3_RSX_Width(), PS3_RSX_Height()
 #endif
         );
 
@@ -234,9 +300,6 @@ static void PS3_GameThread(void *arg)
 
 #if PS3_STAGE == 1
     PS3_Stage1();
-#else
-#error "Stage 2 (client) is not written yet"
-#endif
 
     ps3_log("[8] shutdown");
     SV_Shutdown("Server quit");
@@ -244,6 +307,25 @@ static void PS3_GameThread(void *arg)
     FS_Shutdown(qtrue);
     ps3_log("[8] shutdown done");
     sysThreadExit(0);
+#else
+    ps3_log("[7] main loop");
+    {
+        int frames = 0;
+
+        while (ps3_running) {
+            PS3_Pump();
+            PS3_Input_Frame();
+            Com_Frame();
+            if (++frames == 3)
+                ps3_log("[7] first frames done");
+        }
+    }
+
+    /* XMB exit: the same path as the Quit menu (Com_Quit_f -> Sys_Quit ->
+     * PS3_Shutdown -> exit), config written on the way. */
+    ps3_log("[8] XMB exit requested");
+    Com_Quit_f();
+#endif
 }
 
 int main(int argc, char *argv[])

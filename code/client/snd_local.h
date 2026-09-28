@@ -226,7 +226,14 @@ typedef struct {
 } streamingSound_t;
 
 #define	MAX_RAW_SAMPLES	16384
+#ifdef __PS3__
+// stream 0 (music/cinematics) + the 12 streaming voice channels of the
+// original RTCW. The VoIP-sized default (MAX_CLIENTS * 2 + 1 = 257 streams)
+// costs 32 MB of static memory.
+#define MAX_RAW_STREAMS 13
+#else
 #define MAX_RAW_STREAMS (MAX_CLIENTS * 2 + 1)
+#endif
 extern streamingSound_t streamingSounds[MAX_RAW_STREAMS];
 extern	portable_samplepair_t s_rawsamples[MAX_RAW_STREAMS][MAX_RAW_SAMPLES];
 extern	int		s_rawend[MAX_RAW_STREAMS];

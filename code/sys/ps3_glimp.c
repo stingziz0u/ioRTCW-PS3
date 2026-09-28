@@ -1,4 +1,6 @@
-/* ps3_glimp.c -- RSX/GCM display init and frame management. */
+/* ps3_glimp.c -- RSX/GCM display init, frame management and GLimp_*.
+ *
+ * From IoQuake3-PS3 (Mayo1970), adapted to the iortcw SP renderer. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,14 +13,12 @@
 #include <rsx/gcm_sys.h>
 #include <sysutil/video.h>
 
-#include "qcommon/q_shared.h"
-#include "qcommon/qcommon.h"
-#include "renderercommon/tr_types.h"
-#include "renderercommon/tr_public.h"
+#include "renderer/tr_local.h"
 #include "../sys/ps3_glimp.h"
 #include "../gl/ps3gl.h"
+#include "ps3_log.h"
 
-extern void ps3_log(const char *msg);
+extern void QGL_Init(void);
 
 /* RSX state */
 #define RSX_FB_COUNT 3
@@ -39,6 +39,8 @@ static int ps3_current_rt = -1;
  * validate an unmapped main-memory address, so callers must range-check. */
 const void *ps3_rsx_io_base = NULL;
 size_t      ps3_rsx_io_size = 0;
+
+static int ps3_rsx_up = 0;
 
 static volatile u32 ps3_flip_queued    = 0;
 static volatile u32 ps3_flip_completed = 0;
@@ -115,18 +117,20 @@ static void PS3_RSX_SetRenderTarget(int index)
 
 /* Public interface */
 
-/* GCM IO buffer: 1 MB cmd + 32 MB IO (standard PSL1GHT pattern). */
+/* GCM IO buffer (main memory the RSX can see). ps3gl keeps textures, vertex
+ * ring and shaders in RSX local memory, so only the 1 MB command buffer lives
+ * here: 8 MB instead of IoQuake3-PS3's 32 gives 24 MB back to the hunk. */
 #define RSX_CB_SIZE     (1 * 1024 * 1024)   /* 1 MB command buffer */
-#define RSX_HOST_SIZE   (32 * 1024 * 1024)  /* 32 MB IO buffer     */
+#define RSX_HOST_SIZE   (8 * 1024 * 1024)   /* 8 MB IO buffer      */
 
 void PS3_RSX_Init(void)
 {
     ps3_log("PS3_RSX_Init: entered");
 
-    /* Allocate 1 MB-aligned IO buffer (32 MB). */
+    /* Allocate the 1 MB-aligned IO buffer. */
     void *host_addr = memalign(1024 * 1024, RSX_HOST_SIZE);
     if (!host_addr) {
-        ps3_log("PS3_RSX_Init: FATAL memalign failed for 32MB IO buffer");
+        ps3_log("PS3_RSX_Init: FATAL memalign failed for the IO buffer");
         return;
     }
 
@@ -230,6 +234,7 @@ void PS3_RSX_Init(void)
 
     /* Backup context pointer. */
     ps3_gcm_context_backup = ps3_gcm_context;
+    ps3_rsx_up = 1;
 
     {
         char dbg[256];
@@ -246,10 +251,22 @@ void PS3_RSX_Init(void)
 
 void PS3_RSX_Shutdown(void)
 {
+    static u32 finish_ref = 0x1000;
+
+    if (!ps3_rsx_up)
+        return;
+    ps3_rsx_up = 0;
+
+    /* Flip handler first: a flip completing during teardown must not call
+     * into freed state (Doom64-PS3 lesson). */
+    gcmSetFlipHandler(NULL);
+
     ps3_current_rt = -1;
     ps3gl_shutdown();
 
-    rsxFinish(ps3_gcm_context, 1);
+    /* A new reference every time: rsxFinish with a value it already saw can
+     * hang the whole console. */
+    rsxFinish(ps3_gcm_context, ++finish_ref);
 
     for (int i = 0; i < RSX_FB_COUNT; i++) {
         if (ps3_color_buffer[i]) {
@@ -314,42 +331,56 @@ void PS3_RSX_EndFrame(void)
     ps3_current_fb = (ps3_current_fb + 1) % RSX_FB_COUNT;
 }
 
-/* GLimp interface -- called by ioQ3's renderer */
+/* GLimp interface -- called by the iortcw renderer */
 void GLimp_Init(qboolean fixedFunction)
 {
     (void)fixedFunction;
-    extern glconfig_t glConfig;
 
-    /* Call IN_Init for default controller binds (upstream calls from sdl_glimp.c) */
-    IN_Init(NULL);
+    QGL_Init();
 
     glConfig.vidWidth           = ps3_display_width;
     glConfig.vidHeight          = ps3_display_height;
+    glConfig.windowAspect       = (float)ps3_display_width / (float)ps3_display_height;
     glConfig.colorBits          = 32;
     glConfig.depthBits          = 24;
     glConfig.stencilBits        = 8;
     glConfig.isFullscreen       = qtrue;
-    glConfig.windowAspect       = (float)ps3_display_width / (float)ps3_display_height;
     glConfig.stereoEnabled      = qfalse;
     glConfig.smpActive          = qfalse;
     glConfig.displayFrequency   = 60;
+    glConfig.driverType         = GLDRV_ICD;
+    glConfig.hardwareType       = GLHW_GENERIC;
     glConfig.deviceSupportsGamma = qfalse;
+    glConfig.maxTextureSize     = 2048;
+    glConfig.numTextureUnits    = PS3GL_MAX_TMUS;
     glConfig.textureCompression = TC_NONE;
-    glConfig.numTextureUnits    = 2;    /* RSX supports multiple texture units */
-    glConfig.textureEnvAddAvailable = qtrue; /* We handle GL_ADD texenv mode */
+    glConfig.textureEnvAddAvailable = qtrue;
+    glConfig.anisotropicAvailable = qfalse;
+    glConfig.textureFilterAnisotropicAvailable = qfalse;
+    glConfig.NVFogAvailable     = qfalse;
+    glConfig.ATIMaxTruformTess  = 0;
+
+    textureFilterAnisotropic = qfalse;
+    maxAnisotropy = 0;
+    haveClampToEdge = qtrue;
 
     Q_strncpyz(glConfig.vendor_string, "Sony", sizeof(glConfig.vendor_string));
-    Q_strncpyz(glConfig.renderer_string, "RSX Reality Synthesizer",
-               sizeof(glConfig.renderer_string));
-    Q_strncpyz(glConfig.version_string, "1.1 PSL1GHT",
-               sizeof(glConfig.version_string));
-    Q_strncpyz(glConfig.extensions_string, "GL_ARB_multitexture",
+    Q_strncpyz(glConfig.renderer_string, "RSX (ps3gl)", sizeof(glConfig.renderer_string));
+    Q_strncpyz(glConfig.version_string, "1.1 ps3gl", sizeof(glConfig.version_string));
+    Q_strncpyz(glConfig.extensions_string,
+               "GL_ARB_multitexture GL_EXT_compiled_vertex_array GL_EXT_texture_env_add",
                sizeof(glConfig.extensions_string));
+
+    ri.Cvar_Get("r_availableModes", "", CVAR_ROM);
+
+    PS3_Logf("GLimp_Init: %dx%d", glConfig.vidWidth, glConfig.vidHeight);
+
+    ri.IN_Init(NULL);
 }
 
-void GLimp_Shutdown(qboolean unloadDLL)
+void GLimp_Shutdown(void)
 {
-    (void)unloadDLL;
+    /* The RSX stays up for the whole process (vid_restart keeps it). */
 }
 
 void GLimp_EndFrame(void)
@@ -359,14 +390,12 @@ void GLimp_EndFrame(void)
 
 void GLimp_Minimize(void)
 {
-    /* No minimize on PS3 */
 }
 
 void GLimp_SetGamma(unsigned char red[256], unsigned char green[256],
-                     unsigned char blue[256])
+                    unsigned char blue[256])
 {
     (void)red; (void)green; (void)blue;
-    /* PS3 gamma could be set via RSX but we skip it for now */
 }
 
 void GLimp_LogComment(char *comment)
@@ -374,22 +403,5 @@ void GLimp_LogComment(char *comment)
     (void)comment;
 }
 
-void *GLimp_RendererSleep(void)
-{
-    return NULL;
-}
-
-qboolean GLimp_SpawnRenderThread(void (*function)(void))
-{
-    (void)function;
-    return qfalse;
-}
-
-void GLimp_FrontEndSleep(void)
-{
-}
-
-void GLimp_WakeRenderer(void *data)
-{
-    (void)data;
-}
+int PS3_RSX_Width(void)  { return (int)ps3_display_width; }
+int PS3_RSX_Height(void) { return (int)ps3_display_height; }

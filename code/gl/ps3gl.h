@@ -19,7 +19,7 @@
 #define PS3GL_MAX_VERTS         16384   /* per-batch immediate mode */
 
 /* Vertex ring buffer size (RSX memory) */
-#define PS3GL_VRING_SIZE        (2 * 1024 * 1024)
+#define PS3GL_VRING_SIZE        (8 * 1024 * 1024)   /* 2 segments, RSX local memory */
 
 /* Identity ARGB remap. Fallback for varying PSL1GHT macro definitions. */
 #define PS3GL_TEX_REMAP_IDENTITY  0x00AAE4

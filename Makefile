@@ -77,12 +77,47 @@ PS3_SRCS := \
 
 PS3_ASM_SRCS := $(C)/sys/ps3_setjmp.S
 
+# ---- stage 2 only ----
+CLIENT_SRCS := $(addprefix $(C)/client/, \
+  cl_cgame.c cl_cin.c cl_console.c cl_input.c cl_keys.c cl_main.c cl_net_chan.c \
+  cl_parse.c cl_scrn.c cl_ui.c cl_avi.c \
+  snd_adpcm.c snd_dma.c snd_mem.c snd_mix.c snd_wavelet.c \
+  snd_main.c snd_codec.c snd_codec_wav.c) \
+  $(C)/qcommon/md5.c $(C)/qcommon/puff.c
+
+RENDERER_SRCS := $(addprefix $(C)/renderer/, \
+  tr_animation.c tr_backend.c tr_bsp.c tr_cmds.c tr_cmesh.c tr_curve.c tr_flares.c \
+  tr_font.c tr_image.c tr_image_bmp.c tr_image_jpg.c tr_image_pcx.c tr_image_png.c \
+  tr_image_tga.c tr_init.c tr_light.c tr_main.c tr_marks.c tr_mesh.c tr_model.c \
+  tr_model_iqm.c tr_noise.c tr_scene.c tr_shade.c tr_shade_calc.c tr_shader.c \
+  tr_shadows.c tr_sky.c tr_surface.c tr_world.c)
+
+SPLINES_SRCS := $(addprefix $(C)/splines/, \
+  math_angles.cpp math_matrix.cpp math_quaternion.cpp math_vector.cpp \
+  q_parse.cpp splines.cpp util_str.cpp)
+
+JPEG_SRCS := $(addprefix $(C)/jpeg-8c/, \
+  jaricom.c jcapimin.c jcapistd.c jcarith.c jccoefct.c jccolor.c jcdctmgr.c jchuff.c \
+  jcinit.c jcmainct.c jcmarker.c jcmaster.c jcomapi.c jcparam.c jcprepct.c jcsample.c \
+  jctrans.c jdapimin.c jdapistd.c jdarith.c jdatadst.c jdatasrc.c jdcoefct.c jdcolor.c \
+  jddctmgr.c jdhuff.c jdinput.c jdmainct.c jdmarker.c jdmaster.c jdmerge.c jdpostct.c \
+  jdsample.c jdtrans.c jerror.c jfdctflt.c jfdctfst.c jfdctint.c jidctflt.c jidctfst.c \
+  jidctint.c jmemmgr.c jmemnobs.c jquant1.c jquant2.c jutils.c)
+
+PS3_CLIENT_SRCS := \
+  $(C)/sys/ps3_glimp.c $(C)/input/ps3_input.c $(C)/audio/ps3_snd.c \
+  $(C)/renderer/ps3/qgl_ps3.c \
+  $(addprefix $(C)/gl/, ps3gl_main.c ps3gl_states.c ps3gl_matrices.c ps3gl_vertices.c \
+    ps3gl_colors.c ps3gl_textures.c ps3gl_draw.c ps3gl_shaders.c)
+
 ifeq ($(STAGE),1)
   ENGINE_SRCS := $(COMMON_SRCS) $(SERVER_SRCS) $(BOTLIB_SRCS) $(ZLIB_SRCS) $(PS3_SRCS) \
                  $(C)/null/null_client.c $(C)/null/null_input.c $(C)/null/null_snddma.c
   MODULES     := qagame
 else
-  $(error "STAGE=2 (client) is not written yet: use make STAGE=1")
+  ENGINE_SRCS := $(COMMON_SRCS) $(SERVER_SRCS) $(BOTLIB_SRCS) $(ZLIB_SRCS) $(PS3_SRCS) \
+                 $(CLIENT_SRCS) $(RENDERER_SRCS) $(SPLINES_SRCS) $(JPEG_SRCS) $(PS3_CLIENT_SRCS)
+  MODULES     := qagame cgame ui
 endif
 
 QAGAME_SRCS := $(addprefix $(C)/game/, \
@@ -95,6 +130,20 @@ QAGAME_SRCS := $(addprefix $(C)/game/, \
   g_mover.c g_props.c g_save.c g_script_actions.c g_script.c g_session.c g_spawn.c \
   g_svcmds.c g_target.c g_team.c g_tramcar.c g_trigger.c g_utils.c g_weapon.c \
   g_syscalls.c) \
+  $(C)/qcommon/q_math.c $(C)/qcommon/q_shared.c
+
+CGAME_SRCS := $(addprefix $(C)/cgame/, \
+  cg_main.c cg_consolecmds.c cg_draw.c cg_drawtools.c cg_effects.c cg_ents.c \
+  cg_event.c cg_flamethrower.c cg_info.c cg_localents.c cg_marks.c cg_newdraw.c \
+  cg_particles.c cg_players.c cg_playerstate.c cg_predict.c cg_scoreboard.c \
+  cg_servercmds.c cg_snapshot.c cg_sound.c cg_trails.c cg_view.c cg_weapons.c \
+  cg_syscalls.c) \
+  $(addprefix $(C)/game/, bg_animation.c bg_misc.c bg_pmove.c bg_slidemove.c bg_lib.c) \
+  $(C)/ui/ui_shared.c $(C)/qcommon/q_math.c $(C)/qcommon/q_shared.c
+
+UI_SRCS := $(addprefix $(C)/ui/, \
+  ui_main.c ui_atoms.c ui_gameinfo.c ui_players.c ui_shared.c ui_syscalls.c) \
+  $(addprefix $(C)/game/, bg_misc.c bg_lib.c) \
   $(C)/qcommon/q_math.c $(C)/qcommon/q_shared.c
 
 #---------------------------------------------------------------------------------
@@ -114,14 +163,24 @@ BASE_CFLAGS := -O2 -mno-altivec -fno-strict-aliasing -fno-common -MMD -MP \
 
 ifeq ($(DEBUG),1)
   BASE_CFLAGS += -g -DPS3_DEBUG
+else
+  BASE_CFLAGS += -DNDEBUG
 endif
 BASE_CFLAGS += $(EXTRA_CFLAGS)
 
 ENGINE_CFLAGS := $(BASE_CFLAGS)
 ifeq ($(STAGE),1)
   ENGINE_CFLAGS += -DDEDICATED
+else
+  # XMD_H: libjpeg's "typedef long INT32" would be 64-bit here (see ps3_platform.h)
+  ENGINE_CFLAGS += -DUSE_INTERNAL_JPEG -DXMD_H -I$(CURDIR)/$(C)/jpeg-8c
 endif
 BOTLIB_CFLAGS := $(ENGINE_CFLAGS) -DBOTLIB
+
+# The whole EBOOT shares one 64 KB TOC. Code off the rendering hot path gets
+# its own TOC block per object (-mminimal-toc), keeping headroom for the rest.
+MINTOC_DIRS := $(C)/botlib $(C)/server $(C)/client $(C)/jpeg-8c $(C)/splines $(C)/zlib-1.2.11
+BOTLIB_CFLAGS += -mminimal-toc
 
 # Game modules: -mminimal-toc keeps them out of the single 64 KB TOC.
 MODULE_CFLAGS := $(BASE_CFLAGS) -mminimal-toc
@@ -134,13 +193,19 @@ UI_CFLAGS     := $(MODULE_CFLAGS) -DUI
 # instead; if it fires, shrink TOC use (-mminimal-toc), never drop the flag.
 LDFLAGS := -Wl,--no-multi-toc $(LIBPSL1GHT_LIB)
 LIBS    := -lsysmodule -lsysutil -lrt -llv2 -lm
+ifneq ($(STAGE),1)
+  LIBS  := -lrsx -lgcm_sys -lio -laudio $(LIBS)
+endif
 
 #---------------------------------------------------------------------------------
 # Objects
 #---------------------------------------------------------------------------------
-ENGINE_OBJS := $(patsubst %.c,$(OBJDIR)/engine/%.o,$(ENGINE_SRCS))
+ENGINE_OBJS := $(patsubst %.c,$(OBJDIR)/engine/%.o,$(filter %.c,$(ENGINE_SRCS))) \
+               $(patsubst %.cpp,$(OBJDIR)/engine/%.o,$(filter %.cpp,$(ENGINE_SRCS)))
 ASM_OBJS    := $(patsubst %.S,$(OBJDIR)/engine/%.o,$(PS3_ASM_SRCS))
 QAGAME_OBJS := $(patsubst %.c,$(OBJDIR)/qagame/%.o,$(QAGAME_SRCS))
+CGAME_OBJS  := $(patsubst %.c,$(OBJDIR)/cgame/%.o,$(CGAME_SRCS))
+UI_OBJS     := $(patsubst %.c,$(OBJDIR)/ui/%.o,$(UI_SRCS))
 MODULE_OBJS := $(foreach m,$(MODULES),$(OBJDIR)/$(m)_module.o)
 
 ENGINE_CFLAGS_DEFS := $(foreach m,$(MODULES),-DPS3_NATIVE_$(shell echo $(m) | tr a-z A-Z))
@@ -172,7 +237,7 @@ pkgfiles:
 
 $(ELF): $(ASM_OBJS) $(ENGINE_OBJS) $(MODULE_OBJS)
 	@echo "LD $(notdir $@)"
-	@$(CC) $(ENGINE_CFLAGS) $(LDFLAGS) $(ASM_OBJS) $(ENGINE_OBJS) $(MODULE_OBJS) $(LIBS) -o $@
+	@$(CXX) $(ENGINE_CFLAGS) $(LDFLAGS) $(ASM_OBJS) $(ENGINE_OBJS) $(MODULE_OBJS) $(LIBS) -o $@
 	@$(MAKE) --no-print-directory check
 
 # TOC guard (see LDFLAGS): .got must stay under 64 KB and no r2off stubs.
@@ -186,7 +251,25 @@ check:
 $(OBJDIR)/engine/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "CC $<"
-	@$(CC) $(ENGINE_CFLAGS) -c $< -o $@
+	@$(CC) $(ENGINE_CFLAGS) $(if $(filter $(MINTOC_DIRS),$(patsubst %/,%,$(dir $<))),-mminimal-toc) -c $< -o $@
+
+# splines are C++; the C-only -Werror flags do not apply
+$(OBJDIR)/engine/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	@echo "CXX $<"
+	@$(CXX) $(filter-out -Werror=implicit-function-declaration -Werror=int-conversion,$(ENGINE_CFLAGS)) -mminimal-toc -c $< -o $@
+
+# the GCM/RSX code: syscall stubs break under aggressive inlining (-O1 -fno-inline)
+$(OBJDIR)/engine/$(C)/sys/ps3_glimp.o: $(C)/sys/ps3_glimp.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [rsx]"
+	@$(CC) $(filter-out -O2,$(ENGINE_CFLAGS)) -O1 -fno-inline -c $< -o $@
+
+# the only file with AltiVec (int16 -> float conversion of the mix)
+$(OBJDIR)/engine/$(C)/audio/ps3_snd.o: $(C)/audio/ps3_snd.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [vmx]"
+	@$(CC) $(filter-out -mno-altivec,$(ENGINE_CFLAGS)) -maltivec -c $< -o $@
 
 $(OBJDIR)/engine/$(C)/botlib/%.o: $(C)/botlib/%.c
 	@mkdir -p $(dir $@)
@@ -216,7 +299,19 @@ $(OBJDIR)/%_module.o: $(C)/sys/ps3_module.ld.in
 	@$(OBJCOPY) -G $*_dllEntry -G $*_vmMain -G __$*_data_start -G __$*_data_end \
 	  -G __$*_bss_start -G __$*_bss_end $(OBJDIR)/$*_renamed.o $@
 
+$(OBJDIR)/cgame/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [cgame]"
+	@$(CC) $(CGAME_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/ui/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [ui]"
+	@$(CC) $(UI_CFLAGS) -c $< -o $@
+
 $(OBJDIR)/qagame_module.o: $(QAGAME_OBJS)
+$(OBJDIR)/cgame_module.o: $(CGAME_OBJS)
+$(OBJDIR)/ui_module.o: $(UI_OBJS)
 
 # Download the log over FTP (webMAN): make getlog PS3IP=192.168.x.x
 getlog:
@@ -229,4 +324,4 @@ clean:
 	@rm -rf obj build
 	@echo "clean (the .pkg files are kept)"
 
--include $(ENGINE_OBJS:.o=.d) $(QAGAME_OBJS:.o=.d)
+-include $(ENGINE_OBJS:.o=.d) $(QAGAME_OBJS:.o=.d) $(CGAME_OBJS:.o=.d) $(UI_OBJS:.o=.d)

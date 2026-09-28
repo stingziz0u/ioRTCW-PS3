@@ -83,7 +83,23 @@ void SND_setup(void) {
 
 	scs = (cv->integer*1536);
 
+#ifdef __PS3__
+	// Hard cap, not a default: com_soundMegs is CVAR_ARCHIVE, so a stale
+	// config would beat the command line. The default (32) asks for ~100 MB,
+	// and lv2 hangs instead of returning NULL when a malloc does not fit.
+	if ( cv->integer > PS3_MAX_COMSOUNDMEGS ) {
+		scs = PS3_MAX_COMSOUNDMEGS * 1536;
+	}
+	Com_Printf( "SND_setup: %i KB sound cache (com_soundMegs %i, PS3 cap %i)\n",
+		(int)( ( scs * sizeof( sndBuffer ) ) / 1024 ), cv->integer, PS3_MAX_COMSOUNDMEGS );
+#endif
+
 	buffer = malloc(scs*sizeof(sndBuffer) );
+#ifdef __PS3__
+	if ( !buffer ) {
+		Com_Error( ERR_FATAL, "SND_setup: out of memory for the sound cache" );
+	}
+#endif
 	// allocate the stack based hunk allocator
 	sfxScratchBuffer = malloc(SND_CHUNK_SIZE * sizeof(short) * 4);	//Hunk_Alloc(SND_CHUNK_SIZE * sizeof(short) * 4);
 	sfxScratchPointer = NULL;

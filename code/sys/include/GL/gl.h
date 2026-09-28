@@ -189,6 +189,26 @@ typedef char            GLchar;
 #define GL_VERTEX_ARRAY                 0x8074
 #define GL_COLOR_ARRAY                  0x8076
 #define GL_TEXTURE_COORD_ARRAY          0x8078
+#define GL_NORMAL_ARRAY                 0x8075
+
+/* ----------------------------------------------------------------
+ * Fog and hints (RTCW's global fog)
+ * ---------------------------------------------------------------- */
+#define GL_FOG_DENSITY                  0x0B62
+#define GL_FOG_START                    0x0B63
+#define GL_FOG_END                      0x0B64
+#define GL_FOG_MODE                     0x0B65
+#define GL_FOG_COLOR                    0x0B66
+#define GL_FOG_HINT                     0x0C54
+#define GL_EXP                          0x0800
+#define GL_EXP2                         0x0801
+#define GL_DONT_CARE                    0x1100
+#define GL_FASTEST                      0x1101
+#define GL_NICEST                       0x1102
+
+/* texgen (only referenced in dead code paths) */
+#define GL_EYE_PLANE                    0x2502
+#define GL_OBJECT_PLANE                 0x2501
 
 /* ----------------------------------------------------------------
  * glGet parameters

@@ -32,6 +32,13 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
   identificadores de modelo en commits, README o código. El email público del
   dueño es `323042592+stingziz0u@users.noreply.github.com` (no editar archivos
   desde la web de GitHub: firma con el email real).
+- **Entrega de cambios: parches, no builds.** Claude genera
+  `git format-patch` numerados (`iortcw-ps3-N.patch`, uno o varios commits
+  por archivo) y el dueño los aplica y compila él:
+  `cd ~/ioRTWC-PS3 && git am /mnt/c/Users/Ren/Downloads/iortcw-ps3-N.patch && make -j4 && make verify`.
+  Claude compila en la sesión solo para chequear que el parche compila; no
+  manda PKG ni bundles. `make verify PS3IP=…` confirma qué commit corre en
+  la consola (primera línea del log y `USRDIR/VERSION.TXT`).
 - **Compilar solo lo que hace falta para la prueba.**
 - **PKG que prepara todo**: el PKG crea las carpetas que el usuario tiene que
   llenar (`main/`), **vacías, sin `.txt` de relleno**. Logs siempre dentro del

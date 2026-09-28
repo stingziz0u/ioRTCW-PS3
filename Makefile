@@ -39,6 +39,10 @@ OBJDIR   := $(CURDIR)/obj/$(VARIANT)
 BUILDDIR := $(CURDIR)/build/$(VARIANT)
 PKGFILES := $(BUILDDIR)/pkgfiles
 
+# Build stamp: the commit the EBOOT was built from ("-dirty" = uncommitted
+# changes). Goes to the first log line and to USRDIR/VERSION.TXT.
+GIT_REV := $(shell git describe --always --dirty 2>/dev/null || echo unknown)
+
 include $(PSL1GHT)/ppu_rules
 
 # after the include: ppu_rules sets ICON0 with ?=
@@ -168,7 +172,7 @@ else
 endif
 BASE_CFLAGS += $(EXTRA_CFLAGS)
 
-ENGINE_CFLAGS := $(BASE_CFLAGS)
+ENGINE_CFLAGS := $(BASE_CFLAGS) -I$(OBJDIR)
 ifeq ($(STAGE),1)
   ENGINE_CFLAGS += -DDEDICATED
 else
@@ -217,7 +221,7 @@ ELF := $(OBJDIR)/$(TARGET).elf
 #---------------------------------------------------------------------------------
 # Rules
 #---------------------------------------------------------------------------------
-.PHONY: all clean check getlog
+.PHONY: all clean check getlog verify
 
 all: $(OUT_PKG)
 
@@ -232,8 +236,8 @@ $(OBJDIR)/$(TARGET).pkg: pkgfiles
 pkgfiles:
 	@rm -rf $(PKGFILES)
 	@mkdir -p $(PKGFILES)/USRDIR/main
-	@printf "%s\n%s\nbuilt %s\n" "$(TITLE)" "$(TARGET) $(VARIANT)" "$$(date '+%Y-%m-%d %H:%M')" \
-	  > $(PKGFILES)/USRDIR/VERSION.TXT
+	@printf "%s\n%s\ncommit %s\nbuilt %s\n" "$(TITLE)" "$(TARGET) $(VARIANT)" "$(GIT_REV)" \
+	  "$$(date '+%Y-%m-%d %H:%M')" > $(PKGFILES)/USRDIR/VERSION.TXT
 
 $(ELF): $(ASM_OBJS) $(ENGINE_OBJS) $(MODULE_OBJS)
 	@echo "LD $(notdir $@)"
@@ -247,6 +251,16 @@ check:
 	 echo "   .got = 0x$$got (limit 0x10000), r2off stubs = $$stubs"; \
 	 if [ $$((0x$$got)) -ge $$((0x10000)) ] || [ "$$stubs" != "0" ]; then \
 	   echo "ERROR: TOC over 64 KB -- this EBOOT would hang at boot"; exit 1; fi
+
+# rewritten only when the commit changes, so ps3_main.c recompiles exactly then
+.PHONY: FORCE
+$(OBJDIR)/ps3_rev.h: FORCE
+	@mkdir -p $(dir $@)
+	@echo '#define PS3_BUILD_REV "$(GIT_REV)"' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(OBJDIR)/engine/$(C)/sys/ps3_main.o: $(OBJDIR)/ps3_rev.h
 
 $(OBJDIR)/engine/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -312,6 +326,20 @@ $(OBJDIR)/ui/%.o: %.c
 $(OBJDIR)/qagame_module.o: $(QAGAME_OBJS)
 $(OBJDIR)/cgame_module.o: $(CGAME_OBJS)
 $(OBJDIR)/ui_module.o: $(UI_OBJS)
+
+# Which build is where: your tree, the PKG you built, and (with PS3IP) the
+# one installed on the console. make verify [PS3IP=192.168.x.x]
+verify:
+	@echo "tree      : $(GIT_REV)"
+	@if [ -f $(OUT_PKG) ]; then \
+	   echo "pkg       : $(OUT_PKG), built $$(date -r $(OUT_PKG) '+%Y-%m-%d %H:%M')"; \
+	   echo "pkg commit: $$(sed -n 's/^commit //p' $(PKGFILES)/USRDIR/VERSION.TXT 2>/dev/null)"; \
+	 else echo "pkg       : $(OUT_PKG) not built yet"; fi
+	@if [ -n "$(PS3IP)" ]; then \
+	   c=$$(curl -s ftp://$(PS3IP)/dev_hdd0/game/$(APPID)/USRDIR/VERSION.TXT | sed -n 's/^commit //p'); \
+	   echo "console   : $${c:-nothing installed / FTP not reachable}"; \
+	   if [ "$$c" = "$(GIT_REV)" ]; then echo "==> the console runs this tree"; \
+	   else echo "==> DIFFERENT: rebuild and reinstall the PKG"; fi; fi
 
 # Download the log over FTP (webMAN): make getlog PS3IP=192.168.x.x
 getlog:

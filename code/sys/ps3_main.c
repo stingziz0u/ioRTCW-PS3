@@ -25,6 +25,7 @@
 #include "sys/sys_local.h"
 
 #include "ps3_log.h"
+#include "ps3_rev.h"
 #if PS3_STAGE >= 2
 #include "ps3_glimp.h"
 #include "../input/ps3_input.h"
@@ -337,7 +338,8 @@ int main(int argc, char *argv[])
     (void)argc; (void)argv;
 
     PS3_LogInit();
-    PS3_Logf("[0] main reached: iortcw-ps3 stage %d, built " __DATE__ " " __TIME__, PS3_STAGE);
+    PS3_Logf("[0] main reached: iortcw-ps3 stage %d, commit " PS3_BUILD_REV ", built " __DATE__ " " __TIME__,
+             PS3_STAGE);
 
     ret = sysThreadCreate(&tid, PS3_GameThread, NULL, 1000, PS3_GAME_STACK,
                           THREAD_JOINABLE, "iortcw");

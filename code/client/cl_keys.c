@@ -2334,9 +2334,18 @@ void CL_KeyDownEvent( int key, unsigned time )
 			// any key gets out of clipboard
 			key = K_ESCAPE;
 		} else if ( activeMenu == UIMENU_PREGAME ) {
+#ifdef __PS3__
+			// the pad has no mouse button: let its confirm and arrows through
+			// (ui_shared focuses and activates the "continue" item)
+			if ( key != K_MOUSE1 && key != K_ENTER && key != K_UPARROW && key != K_DOWNARROW &&
+				 key != K_LEFTARROW && key != K_RIGHTARROW ) {
+				return;
+			}
+#else
 			if ( key != K_MOUSE1 ) {
 				return; // eat all keys except mouse click
 			}
+#endif
 		} else {
 
 			// when in the notebook, check for the key bound to "notebook" and allow that as an escape key

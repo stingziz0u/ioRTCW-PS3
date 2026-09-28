@@ -108,13 +108,16 @@ carpeta `SP/`, GPLv3 + términos adicionales de id).
   GL y encima conecta las de ps3gl. Si falta algo, sale en el log.
 - Pad (`ps3_input.c`): en juego todo es tecla bindeable (`K_JOY1..15`); en
   menús/consola X = Enter, O = Escape, cruceta **y stick izq.** = flechas con
-  auto-repeat, stick der. = puntero con aceleración. SELECT solo = notebook
+  auto-repeat, stick der. = puntero con aceleración, □ = click del puntero
+  (K_MOUSE1). SELECT solo = notebook
   (al soltar); SELECT+TRIÁNGULO = consola.
 - Menús con pad (`ui/ui_shared.c`, `#ifdef __PS3__`): un ítem de texto solo
   toma el foco con el cursor encima, así que la navegación apunta al centro
   del ítem y **mueve el cursor ahí** (foco y puntero no se separan). X sin
   foco enfoca el primer ítem, y si es el único del menú (el "continuar" del
-  briefing después de cargar) lo activa. Arreglados dos bugs de upstream en
+  briefing después de cargar) lo activa. El menú "pregame" (escudo de la
+  OSA al empezar una misión) se comía todas las teclas menos el click
+  (`cl_keys.c`): en PS3 deja pasar Enter y flechas. Arreglados dos bugs de upstream en
   `Menu_SetNext/PrevCursorItem` (saltaban el primer/último ítem y podían
   leer `items[-1]`).
 - **Screen fit** (overscan): cvar `vid_ps3_screenfit` (70–100, default 88,

@@ -410,6 +410,7 @@ static int pad_key_for(int b, int catchers)
         switch (b) {
         case PB_CROSS:  return K_ENTER;
         case PB_CIRCLE: return K_ESCAPE;
+        case PB_SQUARE: return K_MOUSE1;    /* click at the pointer (right stick) */
         case PB_UP:     case PB_LS_UP:    return K_UPARROW;
         case PB_DOWN:   case PB_LS_DOWN:  return K_DOWNARROW;
         case PB_LEFT:   case PB_LS_LEFT:  return K_LEFTARROW;

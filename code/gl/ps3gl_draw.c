@@ -88,6 +88,32 @@ void ps3gl_DrawArrays(GLenum mode, GLint first, GLsizei count)
     (void)mode; (void)first; (void)count;
 }
 
+/* Index i of an index array of the given GL type. iortcw uses 32-bit
+ * indices (GL_UNSIGNED_INT); reading them as 16-bit on a big-endian CPU turns
+ * index n into the pair (0, n) and scrambles every triangle. */
+static inline uint32_t ps3gl_index_at(const void *indices, GLenum type, int i)
+{
+    switch (type) {
+    case GL_UNSIGNED_INT:  return ((const uint32_t *)indices)[i];
+    case GL_UNSIGNED_BYTE: return ((const uint8_t *)indices)[i];
+    default:               return ((const uint16_t *)indices)[i];
+    }
+}
+
+static uint32_t ps3gl_elements_prim(GLenum mode)
+{
+    switch (mode) {
+    case GL_POINTS:         return GCM_TYPE_POINTS;
+    case GL_LINES:          return GCM_TYPE_LINES;
+    case GL_LINE_LOOP:      return GCM_TYPE_LINE_LOOP;
+    case GL_LINE_STRIP:     return GCM_TYPE_LINE_STRIP;
+    case GL_TRIANGLE_STRIP: return GCM_TYPE_TRIANGLE_STRIP;
+    case GL_TRIANGLE_FAN:   return GCM_TYPE_TRIANGLE_FAN;
+    case GL_QUADS:          return GCM_TYPE_QUADS;
+    default:                return GCM_TYPE_TRIANGLES;
+    }
+}
+
 void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                         const void *indices)
 {
@@ -110,12 +136,21 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
         num_verts = ps3gl.va_lock_count;
     } else {
         /* Fallback: scan indices for max (shouldn't happen in practice) */
-        int max_idx = 0;
-        const uint16_t *idx = (const uint16_t *)indices;
+        uint32_t max_idx = 0;
         for (int i = 0; i < count; i++) {
-            if ((int)idx[i] > max_idx) max_idx = (int)idx[i];
+            uint32_t ix = ps3gl_index_at(indices, type, i);
+            if (ix > max_idx) max_idx = ix;
         }
-        num_verts = max_idx + 1;
+        if (max_idx >= 65536) {
+            static int warned = 0;
+            if (!warned) {
+                printf("[ps3gl] WARNING: DrawElements index %u does not fit 16 bits\n",
+                       (unsigned)max_idx);
+                warned = 1;
+            }
+            return;
+        }
+        num_verts = (int)max_idx + 1;
     }
 
     const uint8_t *vp  = (const uint8_t *)ps3gl.va_vertex.ptr;
@@ -244,8 +279,7 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     }
 
     /* Submit indexed draw with inline indices. */
-    uint32_t gcm_prim = GCM_TYPE_TRIANGLES; /* Q3 always uses GL_TRIANGLES here */
-    (void)mode; /* mode is always GL_TRIANGLES in practice */
+    uint32_t gcm_prim = ps3gl_elements_prim(mode);
 
     /* RSX wants 16-bit indices; static 65536 buffer avoids a stack alloc. Q3's own
      * tessellator never gets this big (SHADER_MAX_VERTEXES caps it well below), so this is a safety net -- if it ever fires, warn loudly, don't silently eat triangles. */
@@ -261,7 +295,7 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     int n = (count > 65536) ? 65536 : count;
 
     /* Software clip plane: cull triangles where all 3 verts are behind plane. */
-    if (ps3gl.clip_plane_enabled && n >= 3) {
+    if (ps3gl.clip_plane_enabled && n >= 3 && mode == GL_TRIANGLES) {
         float nx   = ps3gl.clip_plane[0];
         float ny   = ps3gl.clip_plane[1];
         float nz   = ps3gl.clip_plane[2];
@@ -276,9 +310,10 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
         }
 
         int out = 0;
-        const uint16_t *src16 = (const uint16_t *)indices;
         for (int i = 0; i + 2 < n; i += 3) {
-            uint16_t i0 = src16[i], i1 = src16[i+1], i2 = src16[i+2];
+            uint16_t i0 = (uint16_t)ps3gl_index_at(indices, type, i);
+            uint16_t i1 = (uint16_t)ps3gl_index_at(indices, type, i + 1);
+            uint16_t i2 = (uint16_t)ps3gl_index_at(indices, type, i + 2);
             if (clip_dist[i0] < 0.0f && clip_dist[i1] < 0.0f && clip_dist[i2] < 0.0f)
                 continue;
             idx16[out++] = i0;
@@ -290,7 +325,12 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
         return;
     }
 
-    /* Q3 uses 16-bit indices; direct memcpy, no conversion needed. */
-    memcpy(idx16, indices, n * sizeof(uint16_t));
+    /* RSX inline indices are 16-bit: convert (or copy) whatever GL sent. */
+    if (type == GL_UNSIGNED_SHORT) {
+        memcpy(idx16, indices, n * sizeof(uint16_t));
+    } else {
+        for (int i = 0; i < n; i++)
+            idx16[i] = (uint16_t)ps3gl_index_at(indices, type, i);
+    }
     rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
 }

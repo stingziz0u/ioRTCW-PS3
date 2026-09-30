@@ -1,4 +1,4 @@
-# ioRTWC-PS3
+# ioRTCW-PS3
 
 A native homebrew port of [iortcw](https://github.com/iortcw/iortcw)
 (Return to Castle Wolfenstein, single player) for the PS3.
@@ -13,7 +13,7 @@ The platform layer and the OpenGL-to-RSX translation layer (ps3gl) started
 from [IoQuake3-PS3](https://github.com/Mayo1970/IoQuake3-PS3). In short:
 
 ```
-Return to Castle Wolfenstein (Gray Matter / Nerve / id Software, 2001) -> iortcw -> ioRTWC-PS3 (this project)
+Return to Castle Wolfenstein (Gray Matter / Nerve / id Software, 2001) -> iortcw -> ioRTCW-PS3 (this project)
 ```
 
 The upstream README (cvars, console commands) is still valid for anything
@@ -98,8 +98,8 @@ the log says why, and a missing `.pk3` is the usual cause.
 2. Clone this repository and build, from its root:
 
    ```bash
-   git clone https://github.com/stingziz0u/ioRTWC-PS3.git
-   cd ioRTWC-PS3
+   git clone https://github.com/stingziz0u/ioRTCW-PS3.git
+   cd ioRTCW-PS3
    make -j4          # -> iortcw-ps3-1.0.pkg
    make verify       # shows the build stamp of the tree and of the PKG
    ```

@@ -5,8 +5,8 @@ scene: a port of [iortcw](https://github.com/iortcw/iortcw) built with
 [PSL1GHT](https://github.com/ps3dev/PSL1GHT), on top of the PS3 platform and
 GL→RSX layers of [IoQuake3-PS3](https://github.com/Mayo1970/IoQuake3-PS3).
 
-The whole campaign plays on a real PS3 at 60 fps in 720p: all 32 maps,
-including the six cutscene levels.
+The whole campaign plays on a real PS3 at mostly 60 fps in 720p: all 32 maps,
+including the six cutscene levels (there's some dips here and there).
 
 ## Features
 
@@ -17,7 +17,7 @@ including the six cutscene levels.
 - The XMB on-screen keyboard names your saves.
 - Screen Fit slider for TVs with overscan, applied live.
 - Distance fog.
-- A USB keyboard and mouse also work.
+- A USB keyboard and mouse should also work.
 - No network code: single player only.
 
 ## Requirements
@@ -37,11 +37,10 @@ including the six cutscene levels.
    - `sp_pak1.pk3`
    - `sp_pak2.pk3`
    - `sp_pak3.pk3`
-   - `sp_pak4.pk3` (the Steam version has it; otherwise it comes in iortcw's
-     `patch-data-141.zip`)
+   - `sp_pak4.pk3`
 3. Start **Return to Castle Wolfenstein** from the XMB.
 
-Each level takes about 20 seconds to load from the HDD.
+Each level takes about 20 seconds to load from the HDD (tested with an SSD).
 
 ## Controls
 

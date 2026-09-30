@@ -1,0 +1,27 @@
+!!ARBfp1.0
+OPTION NV_fragment_program2;
+# q3_fp_replace_fog -- fragment program with fog, NV40 assembly (cgcomp -f -a), by hand.
+# tex0
+# Fog: fragment.texcoord[2] = (fog color, factor), from q3_vp.vpa;
+# rgb = lerp(fogColor, rgb, saturate(factor)), alpha untouched (GL fog).
+# NV40: one interpolated input per instruction.
+#var float4 color : $vin.COLOR0 : COL0 : 0 : 1
+#var float2 tc0 : $vin.TEXCOORD0 : TEX0 : 1 : 1
+#var float2 tc1 : $vin.TEXCOORD1 : TEX1 : 2 : 1
+#var float4 fog : $vin.TEXCOORD2 : TEX2 : 3 : 1
+#var sampler2D tex0 :  : texunit 0 : 4 : 1
+#var sampler2D tex1 :  : texunit 1 : 5 : 1
+#var float4 oColor : $vout.COLOR : COL : 6 : 1
+TEMP R0;
+TEMP R1;
+TEMP R2;
+TEMP R3;
+TEMP R4;
+TEMP RC;
+TEMP HC;
+OUTPUT oCol = result.color;
+TEX R1, fragment.texcoord[0], texture[0], 2D;
+MOVR_SAT R2, fragment.texcoord[2];
+LRPR oCol.xyz, R2.w, R1, R2;
+MOVR oCol.w, R1.w;
+END

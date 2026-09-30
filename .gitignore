@@ -1,0 +1,24 @@
+# Build output
+/build*/
+*.o
+*.d
+*.elf
+*.self
+*.pkg
+EBOOT.BIN
+PARAM.SFO
+
+# Game data (never commit)
+*.pk3
+
+# Editors / OS
+*~
+*.swp
+.DS_Store
+Thumbs.db
+/obj/
+iortcw-ps3*.log
+
+# Patches and bundles passed around while developing
+*.patch
+*.bundle

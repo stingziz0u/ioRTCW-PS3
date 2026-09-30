@@ -1,0 +1,10 @@
+Vendored from https://github.com/iortcw/iortcw
+Commit 438e7d413b5f7277187c35b032eb0ef9093ae778 (2024-05-26), directory SP/.
+Copied unmodified: SP/code/{asm,botlib,cgame,client,game,null,qcommon,renderer,
+server,splines,sys,ui,jpeg-8c,zlib-1.2.11} -> code/, SP/main/ui/menudef.h -> main/ui/.
+Not copied: SDL2, AL, curl, freetype, opus, ogg/vorbis, rend2, tools, prebuilt libs.
+
+PS3 platform layer imported from https://github.com/Mayo1970/IoQuake3-PS3
+Commit 8548c402cae4b2a2dae84a74828b21f56dae4b61 (2026-09-20), GPLv2 (no "only"):
+code/{gl,audio,input}/, code/renderer/* -> code/renderer/ps3/,
+code/sys/ps3_* and code/sys/include/, make_sfo.py. (SPU experiment not copied.)

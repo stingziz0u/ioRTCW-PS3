@@ -80,10 +80,6 @@ static void APIENTRY ps3_Hint(GLenum target, GLenum mode) { (void)target; (void)
 static void APIENTRY ps3_NormalPointer(GLenum type, GLsizei stride, const GLvoid *ptr)
     { (void)type; (void)stride; (void)ptr; }
 
-/* Fog: not implemented on the RSX side yet (maps draw without it). */
-static void APIENTRY ps3_Fogf(GLenum pname, GLfloat param) { (void)pname; (void)param; }
-static void APIENTRY ps3_Fogfv(GLenum pname, const GLfloat *params) { (void)pname; (void)params; }
-static void APIENTRY ps3_Fogi(GLenum pname, GLint param) { (void)pname; (void)param; }
 
 /* ---- Wiring -------------------------------------------------------------- */
 
@@ -177,10 +173,10 @@ void QGL_Init(void)
     qglGetError         = (GetErrorproc *)ps3gl_GetError;
     qglReadPixels       = (ReadPixelsproc *)ps3gl_ReadPixels;
 
-    /* Fog (no-op for now) */
-    qglFogf             = (Fogfproc *)ps3_Fogf;
-    qglFogfv            = (Fogfvproc *)ps3_Fogfv;
-    qglFogi             = (Fogiproc *)ps3_Fogi;
+    /* Fog: GL_FOG + glFog* in the shaders (ps3gl_shaders.c) */
+    qglFogf             = (Fogfproc *)ps3gl_Fogf;
+    qglFogfv            = (Fogfvproc *)ps3gl_Fogfv;
+    qglFogi             = (Fogiproc *)ps3gl_Fogi;
 
     /* Multitexture: two units */
     qglActiveTextureARB       = (void (APIENTRYP)(GLenum))ps3gl_ActiveTextureARB;

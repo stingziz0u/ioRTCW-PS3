@@ -14,6 +14,7 @@ void ps3gl_Color3fv(const GLfloat *v)
 
 void ps3gl_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl.imm.color = ps3gl_pack_color(r, g, b, a);
 }
 

@@ -95,6 +95,54 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 /* Default screen fit (percent of the TV picture used): TVs crop the edges. */
 #define PS3_DEFAULT_SCREENFIT "88"
 
+/* ---- Frame profiler (ps3_prof.c) ------------------------------------------
+ * Time spent per phase of each frame, reported in the log with the [fps]
+ * line. PS3_ProfTick reads the PPU timebase (cheap, no syscall). */
+enum {
+    PS3_PROF_SV,        /* server: game logic, AI, bots */
+    PS3_PROF_CL,        /* whole client frame (the ones below are inside it) */
+    PS3_PROF_CGAME,     /* cgame + renderer front end (culling, sorting) */
+    PS3_PROF_BACKEND,   /* renderer back end + ps3gl (building RSX commands);
+                           with r_smp it runs on the render thread, in parallel,
+                           and so do flipwait, fencewait, anim, shade, gl* */
+    PS3_PROF_FLIPWAIT,  /* waiting for a free frame buffer (GPU behind) */
+    PS3_PROF_FENCEWAIT, /* waiting for the GPU to release vertex ring memory */
+    PS3_PROF_SOUND,     /* S_Update: mixing */
+    PS3_PROF_IDLE,      /* com_maxfps sleep */
+    PS3_PROF_RWAIT,     /* r_smp: game thread waiting for the render thread */
+    PS3_PROF_ANIM,      /* inside backend: CPU skinning of MDS (character) models */
+    PS3_PROF_SHADE,     /* inside backend: shading + drawing batches (RB_EndSurface) */
+    PS3_PROF_GLDRAW,    /* inside shade: ps3gl DrawElements */
+    PS3_PROF_GLCOPY,    /* inside gldraw: copying vertices into RSX memory */
+    PS3_PROF_SURF,      /* inside backend: building surfaces into tess (anim is part) */
+    PS3_PROF_BONES,     /* inside anim: R_CalcBones */
+    PS3_PROF_COLORS,    /* inside shade: per-stage vertex colors (ComputeColors) */
+    PS3_PROF_TCOORDS,   /* inside shade: per-stage texture coords (ComputeTexCoords) */
+    PS3_PROF_COUNT
+};
+static inline unsigned long long PS3_ProfTick(void)
+{
+    unsigned long long tb;
+    __asm__ volatile("mftb %0" : "=r"(tb));
+    return tb;
+}
+void PS3_ProfAdd(int slot, unsigned long long ticks);
+extern int ps3_prof_smp;     /* the render thread is up (set by ps3_glimp.c) */
+/* one module syscall (VM_DllSyscall): args[0] is the call number */
+void PS3_ProfSyscall(const char *module, const intptr_t *args, unsigned long long ticks);
+
+/* ps3gl counters, reset every frame by the profiler */
+typedef struct {
+    unsigned draws;         /* DrawElements/DrawArrays + immediate flushes */
+    unsigned verts;         /* vertices copied into the vertex ring */
+    unsigned indices;       /* inline indices written to the command buffer */
+    unsigned vring_peak;    /* bytes of the ring segment used */
+    unsigned dropped;       /* draws dropped because the ring segment was full */
+} ps3gl_stats_t;
+extern ps3gl_stats_t ps3gl_stats;
+extern unsigned ps3gl_tex_bytes;    /* RSX memory held by textures */
+extern unsigned ps3gl_tex_failed;   /* texture allocations that did not fit */
+
 #define USE_INTERNAL_SDL_HEADERS
 
 /* PSL1GHT's COLOR_* macros collide with the engine's console color constants. */

@@ -15,12 +15,23 @@ void ps3gl_textures_init(void)
     ps3gl.tex_next_name = 1;
 }
 
+static uint32_t mip_total_size(uint32_t pitch, uint32_t w0, uint32_t h0);
+
+/* RSX memory held by textures, for the log (ps3_prof.c) */
+static void tex_free_data(ps3gl_texture_t *t)
+{
+    uint32_t size = mip_total_size((uint32_t)t->width * 4, t->width, t->height);
+
+    ps3gl_tex_bytes = ps3gl_tex_bytes > size ? ps3gl_tex_bytes - size : 0;
+    rsxFree(t->data);
+    t->data = NULL;
+}
+
 void ps3gl_textures_shutdown(void)
 {
     for (int i = 0; i < PS3GL_MAX_TEXTURES; i++) {
         if (ps3gl.textures[i].data) {
-            rsxFree(ps3gl.textures[i].data);
-            ps3gl.textures[i].data = NULL;
+            tex_free_data(&ps3gl.textures[i]);
         }
         ps3gl.textures[i].glname = -1;
     }
@@ -61,6 +72,7 @@ ps3gl_texture_t *ps3gl_texture_alloc(GLuint name)
 
 void ps3gl_GenTextures(GLsizei n, GLuint *textures)
 {
+    PS3GL_FRONT_CHECK();
     if (!textures || n <= 0) return;
     for (int i = 0; i < n; i++) {
         textures[i] = ps3gl.tex_next_name++;
@@ -69,6 +81,7 @@ void ps3gl_GenTextures(GLsizei n, GLuint *textures)
 
 void ps3gl_DeleteTextures(GLsizei n, const GLuint *textures)
 {
+    PS3GL_FRONT_CHECK();
     if (!textures) return;
     for (int i = 0; i < n; i++) {
         ps3gl_texture_t *t = ps3gl_texture_find(textures[i]);
@@ -81,8 +94,7 @@ void ps3gl_DeleteTextures(GLsizei n, const GLuint *textures)
                 }
             }
             if (t->data) {
-                rsxFree(t->data);
-                t->data = NULL;
+                tex_free_data(t);
             }
             t->glname = -1;
         }
@@ -91,6 +103,7 @@ void ps3gl_DeleteTextures(GLsizei n, const GLuint *textures)
 
 void ps3gl_BindTexture(GLenum target, GLuint texture)
 {
+    PS3GL_FRONT_CHECK();
     (void)target; /* only GL_TEXTURE_2D supported */
     if (texture == 0) {
         if (ps3gl.tmu[ps3gl.active_tmu].bound != NULL)
@@ -251,6 +264,7 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                       GLsizei width, GLsizei height, GLint border,
                       GLenum format, GLenum type, const void *pixels)
 {
+    PS3GL_FRONT_CHECK();
     (void)target; (void)border; (void)type;
 
     if (level < 0) return;
@@ -258,7 +272,8 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
     ps3gl_texture_t *t = ps3gl.tmu[ps3gl.active_tmu].bound;
     if (!t) return;
 
-    /* Log first 30 texture uploads for diagnostics */
+    /* Log first 30 texture uploads for diagnostics (make DIAG=1) */
+#ifdef PS3_DIAG
     if (ps3gl_teximg_diag_count < 30) {
         char dbg[128];
         snprintf(dbg, sizeof(dbg),
@@ -269,12 +284,12 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
         ps3_log(dbg);
         ps3gl_teximg_diag_count++;
     }
+#endif
 
     if (level == 0) {
         /* Free old data if base dimensions changed */
         if (t->data && (t->width != (uint16_t)width || t->height != (uint16_t)height)) {
-            rsxFree(t->data);
-            t->data = NULL;
+            tex_free_data(t);
         }
 
         t->width      = (uint16_t)width;
@@ -287,10 +302,15 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
             uint32_t size  = mip_total_size(pitch, (uint32_t)width, (uint32_t)height);
             t->data = (uint8_t *)rsxMemalign(64, size);
             if (!t->data) {
-                printf("[ps3gl] WARNING: failed to allocate %u bytes for texture %d\n",
-                       size, t->glname);
+                char msg[128];
+                if (ps3gl_tex_failed++ < 8) {
+                    snprintf(msg, sizeof(msg), "[ps3gl] WARNING: out of RSX memory: texture %d, %u bytes "
+                             "(textures hold %u KB)", t->glname, size, ps3gl_tex_bytes / 1024);
+                    ps3_log(msg);
+                }
                 return;
             }
+            ps3gl_tex_bytes += size;
             rsxAddressToOffset(t->data, &t->offset);
         }
     }
@@ -320,6 +340,7 @@ void ps3gl_TexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
                          GLsizei w, GLsizei h, GLenum format, GLenum type,
                          const void *pixels)
 {
+    PS3GL_FRONT_CHECK();
     (void)target; (void)type;
     if (level != 0 || !pixels) return;
 
@@ -408,12 +429,14 @@ static void tex_param(GLenum pname, GLint param)
 
 void ps3gl_TexParameterf(GLenum target, GLenum pname, GLfloat param)
 {
+    PS3GL_FRONT_CHECK();
     (void)target;
     tex_param(pname, (GLint)param);
 }
 
 void ps3gl_TexParameteri(GLenum target, GLenum pname, GLint param)
 {
+    PS3GL_FRONT_CHECK();
     (void)target;
     tex_param(pname, param);
 }
@@ -422,6 +445,7 @@ void ps3gl_TexParameteri(GLenum target, GLenum pname, GLint param)
 
 void ps3gl_TexEnvf(GLenum target, GLenum pname, GLfloat param)
 {
+    PS3GL_FRONT_CHECK();
     (void)target;
     if (pname != GL_TEXTURE_ENV_MODE) return;
 
@@ -441,6 +465,7 @@ void ps3gl_TexEnvf(GLenum target, GLenum pname, GLfloat param)
 
 void ps3gl_TexEnvi(GLenum target, GLenum pname, GLint param)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl_TexEnvf(target, pname, (GLfloat)param);
 }
 
@@ -448,6 +473,7 @@ void ps3gl_TexEnvi(GLenum target, GLenum pname, GLint param)
 
 void ps3gl_ActiveTextureARB(GLenum texture)
 {
+    PS3GL_FRONT_CHECK();
     int tmu = (int)(texture - GL_TEXTURE0_ARB);
     if (tmu >= 0 && tmu < PS3GL_MAX_TMUS)
         ps3gl.active_tmu = tmu;

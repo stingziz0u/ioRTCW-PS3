@@ -75,8 +75,18 @@ static void log_write(const char *msg, int newline)
     fflush(log_file);
 }
 
+/* the map test (MAPWALK) reports these per map */
+int ps3_log_warnings, ps3_log_cams;
+
 void PS3_LogRaw(const char *msg)
 {
+    /* not the two shader-script warnings of the game data on every
+     * renderer start (the PC version prints them too) */
+    if ((strstr(msg, "WARNING") || strstr(msg, "Warning") ||
+         strstr(msg, "ERROR") || strstr(msg, "Error")) && !strstr(msg, "In shader file"))
+        ps3_log_warnings++;
+    else if (!strncmp(msg, "[cam] start", 11))
+        ps3_log_cams++;
     log_lock();
     log_write(msg, 0);
     log_unlock();

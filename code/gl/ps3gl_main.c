@@ -77,6 +77,8 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
     ps3gl.fit_y = 0;
     ps3gl.fit_w = (int)w;
     ps3gl.fit_h = (int)h;
+    ps3gl.gl_vp[2] = ps3gl.gl_sc[2] = (int)w;
+    ps3gl.gl_vp[3] = ps3gl.gl_sc[3] = (int)h;
     ps3gl.dirty    = PS3GL_DIRTY_ALL;
 
     ps3gl.imm.color = ps3gl_pack_color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -194,6 +196,7 @@ void ps3gl_begin_frame(void)
     /* Reassert VP once per frame too -- sysutil overlays (OSK, dialogs) can
      * rebind their own vertex program behind our active_vp cache's back. */
     ps3gl.active_vp = NULL;
+    ps3gl.fog_uploaded_gen = ps3gl.fog.gen - 1;    /* fog constants too, once a frame */
     for (int i = 0; i < PS3GL_MAX_TMUS; i++)
         ps3gl.tmu[i].dirty = 1;
 }

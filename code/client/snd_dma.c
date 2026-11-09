@@ -1259,6 +1259,19 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int s_chan
 					break;
 				dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
 				s_rawend[stream]++;
+#ifdef __PS3__
+				if ( scale >= 1.5f ) {
+					// decimating (mix at 22050 Hz): average instead of dropping
+					int k, n = 0, l = 0, r = 0, span = (int)( scale + 0.5f );
+					for ( k = 0; k < span && src + k < samples; k++, n++ ) {
+						l += ((short *)data)[(src+k)*2];
+						r += ((short *)data)[(src+k)*2+1];
+					}
+					rawsamples[dst].left = ( l / n ) * intVolumeLeft;
+					rawsamples[dst].right = ( r / n ) * intVolumeRight;
+					continue;
+				}
+#endif
 				rawsamples[dst].left = ((short *)data)[src*2] * intVolumeLeft;
 				rawsamples[dst].right = ((short *)data)[src*2+1] * intVolumeRight;
 			}
@@ -1273,6 +1286,17 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int s_chan
 				break;
 			dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
 			s_rawend[stream]++;
+#ifdef __PS3__
+			if ( scale >= 1.5f ) {
+				int k, n = 0, m = 0, span = (int)( scale + 0.5f );
+				for ( k = 0; k < span && src + k < samples; k++, n++ ) {
+					m += ((short *)data)[src+k];
+				}
+				rawsamples[dst].left = ( m / n ) * intVolumeLeft;
+				rawsamples[dst].right = ( m / n ) * intVolumeRight;
+				continue;
+			}
+#endif
 			rawsamples[dst].left = ((short *)data)[src] * intVolumeLeft;
 			rawsamples[dst].right = ((short *)data)[src] * intVolumeRight;
 		}
@@ -1608,6 +1632,11 @@ void S_Base_StopBackgroundTrack( void ) {
 	s_rawend[0] = 0;
 }
 
+#ifdef __PS3__
+static char s_backgroundName[MAX_QPATH];    // file of the open stream
+static int s_backgroundDataOfs;             // its first sample
+#endif
+
 /*
 ======================
 S_OpenBackgroundStream
@@ -1631,6 +1660,14 @@ static void S_OpenBackgroundStream( const char *filename ) {
 		return;
 	}
 
+#ifdef __PS3__
+#ifdef PS3_DIAG
+	Com_Printf( "[snd] music %s: %d Hz, %d ch\n", filename, s_backgroundStream->info.rate, s_backgroundStream->info.channels );
+#endif
+	// where the samples start, to rewind a loop instead of reopening it
+	Q_strncpyz( s_backgroundName, filename, sizeof( s_backgroundName ) );
+	s_backgroundDataOfs = FS_FTell( s_backgroundStream->file );
+#endif
 	if(s_backgroundStream->info.channels != 2 || s_backgroundStream->info.rate != 22050) {
 		Com_Printf(S_COLOR_YELLOW "WARNING: music file %s is not 22k stereo\n", filename );
 	}
@@ -1721,6 +1758,16 @@ void S_UpdateBackgroundTrack( void ) {
 		else
 		{
 			// loop
+#ifdef __PS3__
+			// the same wav again: seek back to its first sample. Reopening it
+			// opens the pk3 again (unzOpen): 20-30 ms of HDD in one frame
+			if ( s_backgroundLoop[0] && !Q_stricmp( s_backgroundLoop, s_backgroundName )
+				 && !Q_stricmp( s_backgroundStream->codec->ext, "wav" )
+				 && FS_Seek( s_backgroundStream->file, s_backgroundDataOfs, FS_SEEK_SET ) >= 0 ) {
+				s_backgroundStream->pos = 0;
+				continue;
+			}
+#endif
 			if(s_backgroundLoop[0])
 			{
 				S_OpenBackgroundStream( s_backgroundLoop );

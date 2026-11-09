@@ -114,12 +114,27 @@ static uint32_t ps3gl_elements_prim(GLenum mode)
     }
 }
 
+static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+                                const void *indices);
+
+/* timed for the frame profiler (ps3_prof.c) */
 void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                         const void *indices)
+{
+    unsigned long long t0 = PS3_ProfTick();
+    PS3GL_FRONT_CHECK();
+    ps3gl_DrawElements_(mode, count, type, indices);
+    PS3_ProfAdd(PS3_PROF_GLDRAW, PS3_ProfTick() - t0);
+}
+
+static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+                                const void *indices)
 {
     if (count <= 0) return;
     if (!ps3gl.va_vertex.ptr) return;
     ps3gl_inc_draw_count();
+    ps3gl_stats.draws++;
+    ps3gl_stats.indices += (unsigned)count;
 
     /* Apply all deferred state */
     ps3gl_apply_states();
@@ -212,6 +227,7 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                                          GCM_LOCATION_CELL);
         } else {
             /* Fallback: interleave-copy into RSX ring buffer. */
+            unsigned long long tc0 = PS3_ProfTick();
             uint32_t vb_offset;
             ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
             if (!verts) return;
@@ -255,26 +271,28 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                 }
             }
 
+            PS3_ProfAdd(PS3_PROF_GLCOPY, PS3_ProfTick() - tc0);
+
             rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
                                      vb_offset + PS3GL_VATTR_POS_OFF,
                                      PS3GL_VERTEX_SIZE, 4,
                                      GCM_VERTEX_DATA_TYPE_F32,
-                                     GCM_LOCATION_RSX);
+                                     ps3gl.vring.location);
             rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
                                      vb_offset + PS3GL_VATTR_TC0_OFF,
                                      PS3GL_VERTEX_SIZE, 2,
                                      GCM_VERTEX_DATA_TYPE_F32,
-                                     GCM_LOCATION_RSX);
+                                     ps3gl.vring.location);
             rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
                                      vb_offset + PS3GL_VATTR_TC1_OFF,
                                      PS3GL_VERTEX_SIZE, 2,
                                      GCM_VERTEX_DATA_TYPE_F32,
-                                     GCM_LOCATION_RSX);
+                                     ps3gl.vring.location);
             rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
                                      vb_offset + PS3GL_VATTR_COLOR_OFF,
                                      PS3GL_VERTEX_SIZE, 4,
                                      GCM_VERTEX_DATA_TYPE_U8,
-                                     GCM_LOCATION_RSX);
+                                     ps3gl.vring.location);
         }
     }
 

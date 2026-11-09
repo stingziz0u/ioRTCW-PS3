@@ -2769,6 +2769,9 @@ void Com_Frame( void ) {
 	else
 		minMsec = 1;
 
+#ifdef __PS3__
+	unsigned long long ps3_t0 = PS3_ProfTick();
+#endif
 	do
 	{
 		if(com_sv_running->integer)
@@ -2788,6 +2791,9 @@ void Com_Frame( void ) {
 		else
 			NET_Sleep(timeVal - 1);
 	} while(Com_TimeVal(minMsec));
+#ifdef __PS3__
+	PS3_ProfAdd( PS3_PROF_IDLE, PS3_ProfTick() - ps3_t0 );
+#endif
 
 	IN_Frame();
 	
@@ -2814,7 +2820,13 @@ void Com_Frame( void ) {
 		timeBeforeServer = Sys_Milliseconds();
 	}
 
+#ifdef __PS3__
+	ps3_t0 = PS3_ProfTick();
 	SV_Frame( msec );
+	PS3_ProfAdd( PS3_PROF_SV, PS3_ProfTick() - ps3_t0 );
+#else
+	SV_Frame( msec );
+#endif
 
 	// if "dedicated" has been modified, start up
 	// or shut down the client system.
@@ -2852,7 +2864,13 @@ void Com_Frame( void ) {
 		timeBeforeClient = Sys_Milliseconds ();
 	}
 
+#ifdef __PS3__
+	ps3_t0 = PS3_ProfTick();
 	CL_Frame( msec );
+	PS3_ProfAdd( PS3_PROF_CL, PS3_ProfTick() - ps3_t0 );
+#else
+	CL_Frame( msec );
+#endif
 
 	if ( com_speeds->integer ) {
 		timeAfter = Sys_Milliseconds ();

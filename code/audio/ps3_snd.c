@@ -19,12 +19,21 @@
 
 #include "sys/ps3_log.h"
 
-/* Ring buffer: ~85 ms at 48 kHz. Mixer writes PCM, audio thread reads. */
-#define PS3_AUDIO_RATE       48000
+/* The engine mixes at 22050 Hz, the rate of RTCW's sounds: loaded sounds are
+ * resampled to the mix rate, so mixing at 48 kHz made every sound 2.2x bigger
+ * in the 18 MB sound cache, which then kept evicting and re-reading them from
+ * the HDD in the middle of the game (25 ms stalls). The audio thread converts
+ * 22050 -> 48000 Hz (linear) for the hardware port.
+ * Ring buffer: 2048 sample pairs, ~93 ms at 22050 Hz. */
+#define PS3_AUDIO_RATE       48000  /* hardware port */
+#define PS3_MIX_RATE         22050  /* engine mixer (dma.speed) */
 #define PS3_AUDIO_CHANNELS   2
 #define PS3_AUDIO_BITS       16
-#define PS3_AUDIO_SAMPLES    4096
-#define PS3_AUDIO_BLOCK_SIZE 256    /* PS3 hardware block size */
+#define PS3_MIX_SAMPLES      2048   /* ring, in sample pairs at the mix rate */
+#define PS3_AUDIO_BLOCK_SIZE 256    /* PS3 hardware block size (48 kHz frames) */
+/* 22050 / 48000 = 441 / 960 exactly: mix frame = out frame * 441 / 960 */
+#define PS3_RATE_NUM         441
+#define PS3_RATE_DEN         960
 
 static audioPortConfig  ps3_audio_config;
 static u32              ps3_audio_port = 0;
@@ -34,15 +43,14 @@ static sys_event_queue_t ps3_audio_eventQ;
 static sys_ipc_key_t     ps3_audio_queueKey;
 static sys_ppu_thread_t  ps3_audio_thread;
 static volatile int      ps3_audio_quit = 0;
-static byte ps3_audio_buffer[PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)] __attribute__((aligned(16)));
-static volatile u32 ps3_audio_blocks_written = 0;
+static byte ps3_audio_buffer[PS3_MIX_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)] __attribute__((aligned(16)));
+static volatile u64 ps3_audio_frames_out = 0;   /* 48 kHz frames handed to the port */
 
 static void ps3_audio_thread_func(void *arg)
 {
     (void)arg;
     sys_event_t event;
-    s16 *src = (s16 *)ps3_audio_buffer;
-    int total_interleaved = PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS;
+    const s16 *src = (const s16 *)ps3_audio_buffer;
     int block_samples = PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS;
     int diag_count = 0;
     int timeout_count = 0;
@@ -88,41 +96,34 @@ static void ps3_audio_thread_func(void *arg)
 
         f32 *dst = dataStart + writeBlock * PS3_AUDIO_CHANNELS * PS3_AUDIO_BLOCK_SIZE;
 
-        u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
-
-        /* VMX int16->f32 (8 samples/iter) into an aligned staging buffer, then
-         * memcpy -- audioDataStart's alignment isn't guaranteed and vec_st
-         * silently rounds a misaligned address down instead of faulting. */
+        /* 22050 -> 48000 Hz, linear interpolation, into an aligned staging
+         * buffer then memcpy (audioDataStart's alignment isn't guaranteed) */
         {
             static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
-            const s16 * __restrict__ vsrc = src + ring_pos;
+            const f32 scale = 1.0f / 32768.0f;
+            u64 out = ps3_audio_frames_out;
+            int j;
 
-            const vector float vscale = vec_splats(1.0f / 32768.0f);
-            const vector float vzero  = vec_splats(0.0f);
+            for (j = 0; j < PS3_AUDIO_BLOCK_SIZE; j++) {
+                u64 num = (out + j) * PS3_RATE_NUM;
+                u64 i0 = num / PS3_RATE_DEN;
+                f32 frac = (f32)(num - i0 * PS3_RATE_DEN) * (1.0f / PS3_RATE_DEN);
+                const s16 *a = src + (i0 % PS3_MIX_SAMPLES) * PS3_AUDIO_CHANNELS;
+                const s16 *b = src + ((i0 + 1) % PS3_MIX_SAMPLES) * PS3_AUDIO_CHANNELS;
 
-            int vmx_iters = block_samples / 8;
-            for (int i = 0; i < vmx_iters; i++) {
-                vector signed short vs16 = vec_ld(0, (const vector signed short *)(vsrc + i * 8));
-                vector signed int vi32_hi = vec_unpackh(vs16);
-                vector signed int vi32_lo = vec_unpackl(vs16);
-                vector float vf_hi = vec_madd(vec_ctf(vi32_hi, 0), vscale, vzero);
-                vector float vf_lo = vec_madd(vec_ctf(vi32_lo, 0), vscale, vzero);
-                vec_st(vf_hi, 0,  staging + i * 8);
-                vec_st(vf_lo, 16, staging + i * 8);
+                staging[j * 2]     = ((f32)a[0] + ((f32)b[0] - (f32)a[0]) * frac) * scale;
+                staging[j * 2 + 1] = ((f32)a[1] + ((f32)b[1] - (f32)a[1]) * frac) * scale;
             }
-
             memcpy(dst, staging, (size_t)block_samples * sizeof(f32));
+            ps3_audio_frames_out = out + PS3_AUDIO_BLOCK_SIZE;
         }
-
-        ps3_audio_blocks_written++;
 
         if (diag_count < 5) {
             char buf[128];
             snprintf(buf, sizeof(buf),
-                     "PS3_AUDIO: blk=%u curRd=%u wr=%u ring=%u/%d",
-                     (unsigned)ps3_audio_blocks_written,
-                     (unsigned)currentBlock, (unsigned)writeBlock,
-                     (unsigned)ring_pos, total_interleaved);
+                     "PS3_AUDIO: frames=%u curRd=%u wr=%u",
+                     (unsigned)ps3_audio_frames_out,
+                     (unsigned)currentBlock, (unsigned)writeBlock);
             ps3_log(buf);
             diag_count++;
         }
@@ -219,15 +220,15 @@ qboolean SNDDMA_Init(void)
 
     memset(&dma, 0, sizeof(dma));
     dma.channels         = PS3_AUDIO_CHANNELS;
-    dma.samples          = PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS;
-    dma.fullsamples      = PS3_AUDIO_SAMPLES;
-    dma.submission_chunk = PS3_AUDIO_SAMPLES / 4;
+    dma.samples          = PS3_MIX_SAMPLES * PS3_AUDIO_CHANNELS;
+    dma.fullsamples      = PS3_MIX_SAMPLES;
+    dma.submission_chunk = PS3_MIX_SAMPLES / 8;     /* 256 pairs, ~12 ms */
     dma.samplebits       = PS3_AUDIO_BITS;
-    dma.speed            = PS3_AUDIO_RATE;
+    dma.speed            = PS3_MIX_RATE;
     dma.buffer           = ps3_audio_buffer;
 
     memset(ps3_audio_buffer, 0, sizeof(ps3_audio_buffer));
-    ps3_audio_blocks_written = 0;
+    ps3_audio_frames_out = 0;
 
     ps3_audio_quit = 0;
     ps3_audio_running = 1;
@@ -254,8 +255,8 @@ qboolean SNDDMA_Init(void)
     {
         char buf[128];
         snprintf(buf, sizeof(buf),
-                 "SNDDMA_Init: OK - %d Hz, %d-bit, %d ch, %d sample-pairs, thread started",
-                 PS3_AUDIO_RATE, PS3_AUDIO_BITS, PS3_AUDIO_CHANNELS, PS3_AUDIO_SAMPLES);
+                 "SNDDMA_Init: OK - mix %d Hz -> port %d Hz, %d-bit, %d ch, %d sample-pairs, thread started",
+                 PS3_MIX_RATE, PS3_AUDIO_RATE, PS3_AUDIO_BITS, PS3_AUDIO_CHANNELS, PS3_MIX_SAMPLES);
         ps3_log(buf);
     }
     return qtrue;
@@ -264,9 +265,9 @@ qboolean SNDDMA_Init(void)
 int SNDDMA_GetDMAPos(void)
 {
     if (!ps3_audio_running) return 0;
-    u32 blocks = ps3_audio_blocks_written;
-    u32 pairs = (blocks * PS3_AUDIO_BLOCK_SIZE) % PS3_AUDIO_SAMPLES;
-    return (int)(pairs * PS3_AUDIO_CHANNELS);
+    /* read position in the mix ring (interleaved samples) */
+    u64 mixed = ps3_audio_frames_out * PS3_RATE_NUM / PS3_RATE_DEN;
+    return (int)((mixed % PS3_MIX_SAMPLES) * PS3_AUDIO_CHANNELS);
 }
 
 void SNDDMA_Shutdown(void)

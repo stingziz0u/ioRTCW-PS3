@@ -29,6 +29,13 @@ If you have questions concerning this license or the applicable additional terms
 // tr_sky.c
 #include "tr_local.h"
 
+#ifdef __PS3__
+// r_smp: the back end draws with the fog of the view it is drawing (copied
+// by RB_DrawSurfs), not the front end's, which is already on the next frame
+#define glfogsettings   backEnd.fog
+#define glfogNum        backEnd.fogNum
+#endif
+
 #define SKY_SUBDIVISIONS        8
 #define HALF_SKY_SUBDIVISIONS   ( SKY_SUBDIVISIONS / 2 )
 

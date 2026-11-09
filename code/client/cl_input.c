@@ -436,6 +436,26 @@ void CL_JoystickEvent( int axis, int value, int time ) {
 CL_JoystickMove
 =================
 */
+#ifdef __PS3__
+// stick axis (+/-32K, dead zone already zeroed by the pad code, which does not
+// rescale: the first value past it is ~23%) -> -1..1 with a response curve
+#define PS3_STICK_DEADZONE ( 30.0f / 128.0f )
+static float PS3_StickCurve( int axis ) {
+	float v = axis / 32768.0f;
+	float m = v < 0 ? -v : v;
+
+	if ( m <= PS3_STICK_DEADZONE ) {
+		return 0;
+	}
+	m = ( m - PS3_STICK_DEADZONE ) / ( 1.0f - PS3_STICK_DEADZONE );
+	if ( m > 1 ) {
+		m = 1;
+	}
+	m = 0.25f * m + 0.75f * m * m;
+	return v < 0 ? -m : m;
+}
+#endif
+
 void CL_JoystickMove( usercmd_t *cmd ) {
 	float anglespeed;
 
@@ -444,6 +464,36 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 	float forward = j_forward->value * cl.joystickAxis[j_forward_axis->integer];
 	float pitch   = j_pitch->value   * cl.joystickAxis[j_pitch_axis->integer];
 	float up      = j_up->value      * cl.joystickAxis[j_up_axis->integer];
+
+#ifdef __PS3__
+	{
+		// Stick look. The menus' sensitivity slider (1..10 on PS3, shown as
+		// "Gamepad Sensitivity") sets the top turn speed: 5 = 150 deg/s,
+		// 10 = 300. The stick goes through a curve (fine aim near the center,
+		// full speed at the edge) after removing the pad's dead zone. Scopes
+		// and binoculars slow it down like the mouse; "invert" flips pitch.
+		float sens = cl_sensitivity->value;
+		float rate, a;
+
+		if ( sens < 1 ) {
+			sens = 1;
+		} else if ( sens > 10 ) {
+			sens = 10;
+		}
+		rate = 30.0f * sens;
+		if ( cl.cgameSensitivity > 0 ) {
+			rate *= cl.cgameSensitivity;
+		}
+
+		a = PS3_StickCurve( cl.joystickAxis[j_yaw_axis->integer] );
+		yaw = ( j_yaw->value < 0 ? -rate : rate ) * a;
+		a = PS3_StickCurve( cl.joystickAxis[j_pitch_axis->integer] );
+		pitch = ( j_pitch->value < 0 ? -rate : rate ) * 0.75f * a;
+		if ( m_pitch->value < 0 ) {
+			pitch = -pitch;
+		}
+	}
+#endif
 
 	if ( !( kb[KB_SPEED].active ^ cl_run->integer ) ) {
 		cmd->buttons |= BUTTON_WALKING;
@@ -633,6 +683,182 @@ void CL_FinishMove( usercmd_t *cmd ) {
 CL_CreateCmd
 =================
 */
+#ifdef __PS3__
+/*
+=================
+Lock-on (PS3: L2 = +lockon)
+
+While held, the view turns toward an enemy: the visible one closest to the
+crosshair within cl_lockonAngle degrees and cl_lockonRange units, kept while
+it stays alive and in sight (it may hide for a moment) and replaced by the
+next one when it dies. The turn is smooth (cl_lockonSpeed per second, a
+fraction of the remaining angle), and the right stick still adds its own.
+Enemies are the characters of the nazi and monster AI teams: RTCW SP puts
+the AI team in entityState_t.teamNum (the player is allies).
+
+Everything comes from the latest snapshot: the entity positions are its
+trajectories (velocity) moved to the time the client draws.
+=================
+*/
+static kbutton_t in_lockon;
+static void IN_LockOnDown( void ) { IN_KeyDown( &in_lockon ); }
+static void IN_LockOnUp( void ) { IN_KeyUp( &in_lockon ); }
+
+static cvar_t *cl_lockonSpeed;
+static cvar_t *cl_lockonAngle;
+static cvar_t *cl_lockonRange;
+
+static int cl_lockTarget = -1;      // entity number, -1 = none
+static int cl_lockSeenTime;         // cls.realtime it was last visible
+
+// bg_public.h values (not visible to the client)
+#define PS3_ET_PLAYER       1
+#define PS3_EF_DEAD         0x00000001
+#define PS3_EF_CROUCHING    0x00000020
+#define PS3_EF_NODRAW       0x00000080
+#define PS3_AITEAM_NAZI     0
+#define PS3_AITEAM_MONSTER  2
+#define PS3_PM_NORMAL       0
+#define PS3_LOCK_KEEP_MS    400     // a locked target may hide this long
+#define PS3_LOCK_KEEP_ANGLE 60.0f   // and drift this far off the crosshair
+
+static const entityState_t *CL_LockOnFind( int number ) {
+	int i;
+
+	for ( i = 0; i < cl.snap.numEntities; i++ ) {
+		const entityState_t *es = &cl.parseEntities[( cl.snap.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 )];
+		if ( es->number == number ) {
+			return es;
+		}
+	}
+	return NULL;
+}
+
+static qboolean CL_LockOnIsEnemy( const entityState_t *es ) {
+	if ( es->eType != PS3_ET_PLAYER || es->number == cl.snap.ps.clientNum ) {
+		return qfalse;
+	}
+	if ( es->eFlags & ( PS3_EF_DEAD | PS3_EF_NODRAW ) ) {
+		return qfalse;
+	}
+	return ( es->teamNum == PS3_AITEAM_NAZI || es->teamNum == PS3_AITEAM_MONSTER );
+}
+
+// chest height, where the client draws it now
+static void CL_LockOnPoint( const entityState_t *es, vec3_t out ) {
+	float dt = ( cl.serverTime - cl.snap.serverTime ) * 0.001f;
+
+	if ( dt < -0.1f ) {
+		dt = -0.1f;
+	} else if ( dt > 0.1f ) {
+		dt = 0.1f;
+	}
+	VectorMA( es->pos.trBase, dt, es->pos.trDelta, out );
+	out[2] += ( es->eFlags & PS3_EF_CROUCHING ) ? 8 : 20;
+}
+
+static qboolean CL_LockOnVisible( const vec3_t eye, const vec3_t point ) {
+	trace_t tr;
+
+	CM_BoxTrace( &tr, eye, point, vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse );
+	return ( tr.fraction >= 0.999f );
+}
+
+// the turn from the current view to the point, and how far off it is
+static float CL_LockOnDelta( const vec3_t eye, const vec3_t point, const vec3_t view, float *dyaw, float *dpitch ) {
+	vec3_t dir, ang;
+
+	VectorSubtract( point, eye, dir );
+	vectoangles( dir, ang );
+	*dyaw = AngleSubtract( ang[YAW], view[YAW] );
+	*dpitch = AngleSubtract( ang[PITCH], view[PITCH] );
+	return sqrt( *dyaw * *dyaw + *dpitch * *dpitch );
+}
+
+static void CL_LockOn( void ) {
+	const entityState_t *es, *best = NULL;
+	vec3_t eye, view, point;
+	float dyaw, dpitch, off, bestScore = 1e9f, frac, dt;
+	int i;
+
+	if ( !in_lockon.active || clc.state != CA_ACTIVE || clc.demoplaying || cl_paused->integer
+		 || !cl.snap.valid || cl.snap.ps.pm_type != PS3_PM_NORMAL || cl.snap.ps.stats[0] <= 0 ) {
+		cl_lockTarget = -1;
+		return;
+	}
+
+	VectorCopy( cl.snap.ps.origin, eye );
+	eye[2] += cl.snap.ps.viewheight;
+	for ( i = 0; i < 3; i++ ) {
+		view[i] = cl.viewangles[i] + SHORT2ANGLE( cl.snap.ps.delta_angles[i] );
+	}
+
+	// keep the locked one while it lives and has not been out of sight long
+	if ( cl_lockTarget >= 0 ) {
+		es = CL_LockOnFind( cl_lockTarget );
+		if ( es && CL_LockOnIsEnemy( es ) ) {
+			CL_LockOnPoint( es, point );
+			off = CL_LockOnDelta( eye, point, view, &dyaw, &dpitch );
+			if ( CL_LockOnVisible( eye, point ) ) {
+				cl_lockSeenTime = cls.realtime;
+			}
+			if ( off <= PS3_LOCK_KEEP_ANGLE && cls.realtime - cl_lockSeenTime <= PS3_LOCK_KEEP_MS ) {
+				best = es;
+			}
+		}
+	}
+
+	// or take the one closest to the crosshair
+	if ( !best ) {
+		cl_lockTarget = -1;
+		for ( i = 0; i < cl.snap.numEntities; i++ ) {
+			vec3_t d;
+			float dist, score;
+
+			es = &cl.parseEntities[( cl.snap.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 )];
+			if ( !CL_LockOnIsEnemy( es ) ) {
+				continue;
+			}
+			CL_LockOnPoint( es, point );
+			VectorSubtract( point, eye, d );
+			dist = VectorLength( d );
+			if ( dist > cl_lockonRange->value ) {
+				continue;
+			}
+			off = CL_LockOnDelta( eye, point, view, &dyaw, &dpitch );
+			if ( off > cl_lockonAngle->value ) {
+				continue;
+			}
+			score = off + dist * 0.005f;    // 200 units farther weigh like 1 degree
+			if ( score >= bestScore || !CL_LockOnVisible( eye, point ) ) {
+				continue;
+			}
+			bestScore = score;
+			best = es;
+		}
+		if ( !best ) {
+			return;
+		}
+		cl_lockTarget = best->number;
+		cl_lockSeenTime = cls.realtime;
+#ifdef PS3_DIAG
+		Com_Printf( "[lock] entity %d (team %d), score %.1f\n", best->number, best->teamNum, bestScore );
+#endif
+	}
+
+	// turn a fraction of the way, the same per second at any frame rate
+	CL_LockOnPoint( best, point );
+	CL_LockOnDelta( eye, point, view, &dyaw, &dpitch );
+	dt = cls.frametime * 0.001f;
+	if ( dt > 0.1f ) {
+		dt = 0.1f;
+	}
+	frac = 1.0f - exp( -cl_lockonSpeed->value * dt );
+	cl.viewangles[YAW] += dyaw * frac;
+	cl.viewangles[PITCH] += dpitch * frac;
+}
+#endif
+
 usercmd_t CL_CreateCmd( void ) {
 	usercmd_t cmd;
 	vec3_t oldAngles;
@@ -655,6 +881,10 @@ usercmd_t CL_CreateCmd( void ) {
 
 	// get basic movement from joystick
 	CL_JoystickMove( &cmd );
+#ifdef __PS3__
+	// L2: pull the view toward the enemy
+	CL_LockOn();
+#endif
 
 	// check to make sure the angles haven't wrapped
 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
@@ -1060,6 +1290,13 @@ void CL_InitInput( void ) {
 	// wolf buttons
 	Cmd_AddCommand( "+attack2",      IN_Wbutton0Down );   //----(SA) secondary firing
 	Cmd_AddCommand( "-attack2",      IN_Wbutton0Up );
+#ifdef __PS3__
+	Cmd_AddCommand( "+lockon", IN_LockOnDown );
+	Cmd_AddCommand( "-lockon", IN_LockOnUp );
+	cl_lockonSpeed = Cvar_Get( "cl_lockonSpeed", "12", CVAR_ARCHIVE );
+	cl_lockonAngle = Cvar_Get( "cl_lockonAngle", "30", CVAR_ARCHIVE );
+	cl_lockonRange = Cvar_Get( "cl_lockonRange", "3000", CVAR_ARCHIVE );
+#endif
 	Cmd_AddCommand( "+zoom",     IN_ZoomDown );       //
 	Cmd_AddCommand( "-zoom",     IN_ZoomUp );
 	Cmd_AddCommand( "+quickgren",    IN_QuickGrenDown );  //
@@ -1150,6 +1387,10 @@ void CL_ShutdownInput(void)
 
 	Cmd_RemoveCommand("+attack2");
 	Cmd_RemoveCommand("-attack2");
+#ifdef __PS3__
+	Cmd_RemoveCommand( "+lockon" );
+	Cmd_RemoveCommand( "-lockon" );
+#endif
 	Cmd_RemoveCommand("+zoom");
 	Cmd_RemoveCommand("-zoom");
 	Cmd_RemoveCommand("+quickgren");

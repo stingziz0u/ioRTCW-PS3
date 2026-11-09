@@ -1218,8 +1218,69 @@ static void RB_CalcDiffuseColor_scalar( unsigned char *colors )
 	}
 }
 
+#ifdef __PS3__
+/*
+** PS3: ri.ftol is newlib's lrintf, a software routine called through a
+** pointer, three times per vertex. And on the PPU any float -> int goes out
+** through memory: reading it back right away stalls (load-hit-store, ~40
+** cycles). So the colors are converted in one pass (fctiw + stfiwx, rounded
+** like lrintf, clamped before) and packed in a second one, when those stores
+** are long done.
+*/
+static int ps3_diffuseInts[SHADER_MAX_VERTEXES * 3];
+
+static void RB_CalcDiffuseColor_ps3( unsigned char *colors )
+{
+	int				i;
+	float			*normal;
+	float			incoming, c;
+	trRefEntity_t	*ent;
+	vec3_t			ambientLight;
+	vec3_t			lightDir;
+	vec3_t			directedLight;
+	int				numVertexes, *out;
+
+	ent = backEnd.currentEntity;
+	VectorCopy( ent->ambientLight, ambientLight );
+	VectorCopy( ent->directedLight, directedLight );
+	VectorCopy( ent->lightDir, lightDir );
+
+	normal = tess.normal[0];
+	numVertexes = tess.numVertexes;
+	if ( numVertexes > SHADER_MAX_VERTEXES ) {
+		numVertexes = SHADER_MAX_VERTEXES;
+	}
+
+	out = ps3_diffuseInts;
+	for ( i = 0 ; i < numVertexes ; i++, normal += 4, out += 3 ) {
+		incoming = DotProduct( normal, lightDir );
+		if ( incoming <= 0 ) {
+			incoming = 0.0;
+		}
+		c = ambientLight[0] + incoming * directedLight[0];
+		PS3_StoreRoundedInt( c > 255.0f ? 255.0f : c, out + 0 );
+		c = ambientLight[1] + incoming * directedLight[1];
+		PS3_StoreRoundedInt( c > 255.0f ? 255.0f : c, out + 1 );
+		c = ambientLight[2] + incoming * directedLight[2];
+		PS3_StoreRoundedInt( c > 255.0f ? 255.0f : c, out + 2 );
+	}
+
+	out = ps3_diffuseInts;
+	for ( i = 0 ; i < numVertexes ; i++, out += 3, colors += 4 ) {
+		colors[0] = out[0];
+		colors[1] = out[1];
+		colors[2] = out[2];
+		colors[3] = 255;
+	}
+}
+#endif
+
 void RB_CalcDiffuseColor( unsigned char *colors )
 {
+#ifdef __PS3__
+	RB_CalcDiffuseColor_ps3( colors );
+	return;
+#endif
 #if idppc_altivec
 	if (com_altivec->integer) {
 		// must be in a separate translation unit or G3 systems will crash.

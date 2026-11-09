@@ -76,6 +76,64 @@ void R_PerformanceCounters( void ) {
 	memset( &backEnd.pc, 0, sizeof( backEnd.pc ) );
 }
 
+#ifdef __PS3__
+/*
+====================
+r_smp: the back end on the PPU's second hardware thread
+
+The front end fills backEndData (one of r_smpBackEndData[]) while the render
+thread draws the other one. R_IssueRenderCommands waits for the previous
+batch and hands over the new one; R_InitNextFrame swaps the buffers. Every
+GL call of the front end goes after R_IssuePendingRenderCommands, which here
+also waits for the back end to finish.
+====================
+*/
+backEndData_t *r_smpBackEndData[2];
+
+// cinematics on shaders (videoMap): decoding reads files and hunk temp
+// memory, which only the game thread may touch. The back end marks the
+// handles it drew; they are decoded and uploaded here while it is idle.
+static volatile int r_smpVideoMaps;
+
+void R_SMP_VideoMap( int handle ) {
+	if ( handle >= 0 && handle < 32 ) {
+		r_smpVideoMaps |= 1 << handle;
+	}
+}
+
+static void R_SMP_RunVideoMaps( void ) {
+	int i, maps = r_smpVideoMaps;
+
+	r_smpVideoMaps = 0;
+	for ( i = 0; maps; i++, maps >>= 1 ) {
+		if ( maps & 1 ) {
+			ri.CIN_RunCinematic( i );
+			ri.CIN_UploadCinematic( i );
+		}
+	}
+}
+
+void R_InitCommandBuffers( void ) {
+	glConfig.smpActive = qfalse;
+	if ( r_smp->integer && r_smpBackEndData[1] ) {
+		if ( GLimp_SpawnRenderThread( RB_RenderThread ) ) {
+			glConfig.smpActive = qtrue;
+		}
+	}
+	if ( !glConfig.smpActive ) {
+		ri.Printf( PRINT_ALL, "r_smp: back end on the game thread\n" );
+	}
+}
+
+void R_ShutdownCommandBuffers( void ) {
+	if ( glConfig.smpActive ) {
+		GLimp_ShutdownRenderThread();
+		glConfig.smpActive = qfalse;
+		r_smpVideoMaps = 0;     // the textures may be gone already
+	}
+}
+#endif
+
 /*
 ====================
 R_IssueRenderCommands
@@ -92,6 +150,14 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters ) {
 	// clear it out, in case this is a sync and not a buffer flip
 	cmdList->used = 0;
 
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		// the back end must be done with the previous batch
+		GLimp_FrontEndSleep();
+		R_SMP_RunVideoMaps();
+	}
+#endif
+
 	if ( runPerformanceCounters ) {
 		R_PerformanceCounters();
 	}
@@ -99,7 +165,17 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters ) {
 	// actually start the commands going
 	if ( !r_skipBackEnd->integer ) {
 		// let it start on the new batch
+#ifdef __PS3__
+		if ( glConfig.smpActive ) {
+			GLimp_WakeRenderer( cmdList->cmds );
+		} else {
+			unsigned long long t0 = PS3_ProfTick();
+			RB_ExecuteRenderCommands( cmdList->cmds );
+			PS3_ProfAdd( PS3_PROF_BACKEND, PS3_ProfTick() - t0 );
+		}
+#else
 		RB_ExecuteRenderCommands( cmdList->cmds );
+#endif
 	}
 }
 
@@ -116,6 +192,17 @@ void R_IssuePendingRenderCommands( void ) {
 		return;
 	}
 
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		// the caller is about to use GL (or the back end's state) itself:
+		// whatever was queued must be drawn and the render thread idle
+		if ( backEndData->commands.used ) {
+			R_IssueRenderCommands( qfalse );
+		}
+		GLimp_FrontEndSleep();
+		return;
+	}
+#endif
 	R_IssueRenderCommands( qfalse );
 }
 
@@ -179,6 +266,10 @@ void    R_AddDrawSurfCmd( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 
 	cmd->refdef = tr.refdef;
 	cmd->viewParms = tr.viewParms;
+#ifdef __PS3__
+	memcpy( cmd->fog, glfogsettings, sizeof( cmd->fog ) );
+	cmd->fogNum = glfogNum;
+#endif
 }
 
 
@@ -335,13 +426,6 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	if ( !tr.registered ) {
 		return;
 	}
-#ifdef __PS3__
-	{
-		// wait for a free framebuffer and open the ps3gl frame
-		extern void PS3_RSX_BeginFrame( void );
-		PS3_RSX_BeginFrame();
-	}
-#endif
 	glState.finishCalled = qfalse;
 
 	tr.frameCount++;
@@ -475,6 +559,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 		R_SetColorMappings();
 	}
 
+#ifndef __PS3__     // ps3gl's glGetError is always GL_NO_ERROR, and the sync would stall r_smp
 	// check for errors
 	if ( !r_ignoreGLErrors->integer ) {
 		int err;
@@ -484,6 +569,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 			ri.Error( ERR_FATAL, "RE_BeginFrame() - glGetError() failed (0x%x)!", err );
 		}
 	}
+#endif
 
 #ifndef USE_OPENGLES
 	if (glConfig.stereoEnabled) {

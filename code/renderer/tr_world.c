@@ -180,7 +180,11 @@ static int R_DlightFace( srfSurfaceFace_t *face, int dlightBits ) {
 		tr.pc.c_dlightSurfacesCulled++;
 	}
 
+#ifdef __PS3__
+	face->dlightBits[SMP_FRONT] = dlightBits;
+#else
 	face->dlightBits = dlightBits;
+#endif
 	return dlightBits;
 }
 
@@ -208,14 +212,24 @@ static int R_DlightGrid( srfGridMesh_t *grid, int dlightBits ) {
 		tr.pc.c_dlightSurfacesCulled++;
 	}
 
+#ifdef __PS3__
+	grid->dlightBits[SMP_FRONT] = dlightBits;
+	return dlightBits;
+}
+#else
 	grid->dlightBits = dlightBits;
 	return dlightBits;
 }
+#endif
 
 
 static int R_DlightTrisurf( srfTriangles_t *surf, int dlightBits ) {
 	// FIXME: more dlight culling to trisurfs...
+#ifdef __PS3__
+	surf->dlightBits[SMP_FRONT] = dlightBits;
+#else
 	surf->dlightBits = dlightBits;
+#endif
 	return dlightBits;
 #if 0
 	int i;
@@ -463,6 +477,18 @@ static void R_RecursiveWorldNode( mnode_t *node, unsigned int planeBits, unsigne
 				}
 			}
 
+#ifdef __PS3__
+			if ( planeBits & 16 ) {             // past the end of the linear fog
+				r = BoxOnPlaneSide( node->mins, node->maxs, &tr.viewParms.fogPlane );
+				if ( r == 2 ) {
+					return;                     // culled
+				}
+				if ( r == 1 ) {
+					planeBits &= ~16;
+				}
+			}
+#endif
+
 		}
 
 		if ( node->contents != -1 ) {
@@ -706,5 +732,9 @@ void R_AddWorldSurfaces( void ) {
 	if ( tr.refdef.num_dlights > MAX_DLIGHTS ) {
 		tr.refdef.num_dlights = MAX_DLIGHTS ;
 	}
+#ifdef __PS3__
+	R_RecursiveWorldNode( tr.world->nodes, tr.viewParms.fogCull ? 31 : 15, ( 1ULL << tr.refdef.num_dlights ) - 1 );
+#else
 	R_RecursiveWorldNode( tr.world->nodes, 15, ( 1ULL << tr.refdef.num_dlights ) - 1 );
+#endif
 }

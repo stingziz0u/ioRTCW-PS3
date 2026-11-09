@@ -353,7 +353,19 @@ intptr_t QDECL VM_DllSyscall( intptr_t arg, ... ) {
     args[i] = va_arg(ap, intptr_t);
   va_end(ap);
   
+#ifdef __PS3__
+  {
+    // time per syscall, per module (ps3_prof.c): what the cgame and game
+    // modules spend inside the engine (traces, rendering, loading assets)
+    vm_t *vm = currentVM;
+    unsigned long long t0 = PS3_ProfTick();
+    intptr_t ret = vm->systemCall( args );
+    PS3_ProfSyscall( vm->name, args, PS3_ProfTick() - t0 );
+    return ret;
+  }
+#else
   return currentVM->systemCall( args );
+#endif
 #else // original id code
 	return currentVM->systemCall( &arg );
 #endif

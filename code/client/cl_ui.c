@@ -629,6 +629,21 @@ Key_KeynumToStringBuf
 ====================
 */
 static void Key_KeynumToStringBuf( int keynum, char *buf, int buflen ) {
+#ifdef __PS3__
+	// the menus show the DualShock 3 buttons (ps3_input.c maps them to
+	// K_JOY1..16, 16 = SELECT held); the config keeps the JOYn names
+	// (Key_KeynumToString)
+	static const char *ps3names[16] = {
+		"CROSS", "CIRCLE", "SQUARE", "TRIANGLE", "L1", "R1", "L2", "R2",
+		"L3", "R3", "SELECT", "D-PAD UP", "D-PAD DOWN", "D-PAD LEFT", "D-PAD RIGHT",
+		"SELECT (HOLD)"
+	};
+
+	if ( keynum >= K_JOY1 && keynum <= K_JOY16 ) {
+		Q_strncpyz( buf, ps3names[keynum - K_JOY1], buflen );
+		return;
+	}
+#endif
 	Q_strncpyz( buf, Key_KeynumToString( keynum, qtrue ), buflen );
 }
 

@@ -110,7 +110,7 @@ def main():
         sys.exit(1)
 
     params = [
-        ("APP_VER",         "01.00"),
+        ("APP_VER",         "01.10"),
         ("ATTRIBUTE",       0),
         ("BOOTABLE",        1),
         ("CATEGORY",        "HG"),

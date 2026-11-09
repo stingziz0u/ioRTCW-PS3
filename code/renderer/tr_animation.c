@@ -431,6 +431,60 @@ static float sp, sy;
 //static float    cr; // TTimo: unused
 static float cp, cy;
 
+#ifdef __PS3__
+/*
+Bones call sin/cos 10-14 times each, and newlib's double precision sin/cos
+are slow on the PPU: with a few characters on screen that was a good part of
+LerpTag and the skinning. Single precision polynomial instead, max error
+about 4e-6 (the angles come from 16-bit shorts anyway).
+*/
+static ID_INLINE float PS3_SinTurns( float t ) {    // t in turns, any value
+	float x, x2;
+
+	t -= (float)(int)( t >= 0 ? t + 0.5f : t - 0.5f );     // [-0.5, 0.5]
+	x = t * ( 2.0f * M_PI );                                // [-pi, pi]
+	if ( x > 0.5f * M_PI ) {
+		x = M_PI - x;
+	} else if ( x < -0.5f * M_PI ) {
+		x = -M_PI - x;
+	}
+	x2 = x * x;
+	return x * ( 1.0f + x2 * ( -1.0f / 6.0f + x2 * ( 1.0f / 120.0f +
+			 x2 * ( -1.0f / 5040.0f + x2 * ( 1.0f / 362880.0f ) ) ) ) );
+}
+#define PS3_SIN_DEG( d )  PS3_SinTurns( ( d ) * ( 1.0f / 360.0f ) )
+#define PS3_COS_DEG( d )  PS3_SinTurns( ( d ) * ( 1.0f / 360.0f ) + 0.25f )
+
+static ID_INLINE void LocalAngleVector( vec3_t angles, vec3_t forward ) {
+	sy = PS3_SIN_DEG( angles[YAW] );
+	cy = PS3_COS_DEG( angles[YAW] );
+	sp = PS3_SIN_DEG( angles[PITCH] );
+	cp = PS3_COS_DEG( angles[PITCH] );
+
+	forward[0] = cp * cy;
+	forward[1] = cp * sy;
+	forward[2] = -sp;
+}
+
+// AnglesToAxis (q_math.c) with the fast sin/cos
+static void PS3_AnglesToAxis( const vec3_t angles, vec3_t axis[3] ) {
+	float ay = PS3_SIN_DEG( angles[YAW] ), ac = PS3_COS_DEG( angles[YAW] );
+	float ps = PS3_SIN_DEG( angles[PITCH] ), pc = PS3_COS_DEG( angles[PITCH] );
+	float rs = PS3_SIN_DEG( angles[ROLL] ), rc = PS3_COS_DEG( angles[ROLL] );
+
+	axis[0][0] = pc * ac;
+	axis[0][1] = pc * ay;
+	axis[0][2] = -ps;
+	// axis[1] = -right
+	axis[1][0] = rs * ps * ac + rc * -ay;
+	axis[1][1] = rs * ps * ay + rc * ac;
+	axis[1][2] = rs * pc;
+	axis[2][0] = rc * ps * ac + -rs * -ay;
+	axis[2][1] = rc * ps * ay + -rs * ac;
+	axis[2][2] = rc * pc;
+}
+#define AnglesToAxis PS3_AnglesToAxis
+#else
 static ID_INLINE void LocalAngleVector( vec3_t angles, vec3_t forward ) {
 	LAVangle = angles[YAW] * ( M_PI * 2 / 360 );
 	sy = sin( LAVangle );
@@ -443,6 +497,7 @@ static ID_INLINE void LocalAngleVector( vec3_t angles, vec3_t forward ) {
 	forward[1] = cp * sy;
 	forward[2] = -sp;
 }
+#endif
 
 static ID_INLINE void LocalVectorMA( vec3_t org, float dist, vec3_t vec, vec3_t out ) {
 	out[0] = org[0] + dist * vec[0];
@@ -1046,6 +1101,20 @@ void R_CalcBones( mdsHeader_t *header, const refEntity_t *refent, int *boneList,
 RB_SurfaceAnim
 ==============
 */
+#if defined( __PS3__ ) && !defined( PS3_BONES_FRONT )
+// timed for the frame profiler (ps3_prof.c): CPU skinning of the MDS models.
+// With r_smp this runs on the render thread while cgame's LerpTag runs on the
+// game thread; that one uses its own copy of this file's static bone state
+// (tr_animation_front.c), so the two never wait for or evict each other.
+static void RB_SurfaceAnim_( mdsSurface_t *surface );
+void RB_SurfaceAnim( mdsSurface_t *surface ) {
+	unsigned long long t0 = PS3_ProfTick();
+	RB_SurfaceAnim_( surface );
+	PS3_ProfAdd( PS3_PROF_ANIM, PS3_ProfTick() - t0 );
+}
+#define RB_SurfaceAnim RB_SurfaceAnim_
+static
+#endif
 void RB_SurfaceAnim( mdsSurface_t *surface ) {
 	int j, k;
 	refEntity_t *refent;
@@ -1063,7 +1132,15 @@ void RB_SurfaceAnim( mdsSurface_t *surface ) {
 	boneList = ( int * )( (byte *)surface + surface->ofsBoneReferences );
 	header = ( mdsHeader_t * )( (byte *)surface + surface->ofsHeader );
 
+#if defined( __PS3__ ) && !defined( PS3_BONES_FRONT )
+	{
+		unsigned long long ps3t0 = PS3_ProfTick();
+		R_CalcBones( header, (const refEntity_t *)refent, boneList, surface->numBoneReferences );
+		PS3_ProfAdd( PS3_PROF_BONES, PS3_ProfTick() - ps3t0 );
+	}
+#else
 	R_CalcBones( header, (const refEntity_t *)refent, boneList, surface->numBoneReferences );
+#endif
 
 	DBG_SHOWTIME
 

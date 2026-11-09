@@ -12,6 +12,20 @@
 
 #include "GL/gl.h"
 
+/* r_smp (ps3_glimp.c): ps3gl belongs to the render thread while it runs a
+ * batch. A call from any other stack meanwhile is a missing sync in the
+ * renderer: ps3gl_front_call logs it once and waits for the back end. */
+extern volatile int ps3_render_busy;
+extern uintptr_t ps3_render_stack_lo, ps3_render_stack_hi;
+void ps3gl_front_call(const char *func);
+#define PS3GL_FRONT_CHECK() do { \
+    if (__builtin_expect(ps3_render_busy, 0)) { \
+        uintptr_t sp_ = (uintptr_t)__builtin_frame_address(0); \
+        if (sp_ < ps3_render_stack_lo || sp_ >= ps3_render_stack_hi) \
+            ps3gl_front_call(__func__); \
+    } \
+} while (0)
+
 /* Constants */
 #define PS3GL_MAX_TMUS          2
 #define PS3GL_MAX_MATRIX_STACK  32
@@ -118,7 +132,15 @@ typedef struct {
     int         cur_seg;       /* 0 or 1 */
     volatile uint32_t *fence_label[PS3GL_VRING_SEGMENTS]; /* GCM label addr; RSX writes here when pipeline drains */
     uint32_t    fence_val[PS3GL_VRING_SEGMENTS];           /* last value written to each label */
+    uint32_t    location;      /* GCM_LOCATION_CELL (main memory, IO-mapped) or _RSX */
 } ps3gl_vring_t;
+
+/* PS3 port: the ring lives in the IO-mapped main memory after the command
+ * buffer (the upper half of the 8 MB IO buffer). The PPU writes it through
+ * its cache instead of uncached stores into RSX local memory, which cost
+ * ~150 ns per vertex (2+ ms a frame). Falls back to RSX memory. */
+#define PS3GL_VRING_IO_OFFSET   (4 * 1024 * 1024)
+#define PS3GL_VRING_IO_SIZE     (4 * 1024 * 1024)   /* 2 segments of 2 MB */
 
 /* Shader program pair (vertex + fragment) */
 typedef struct {
@@ -127,6 +149,8 @@ typedef struct {
     uint32_t            vp_ucode_size;
     rsxProgramConst    *mvp_const;
     rsxProgramConst    *clip_plane_const; /* world-space clip plane uniform; NULL if not in binary */
+    rsxProgramConst    *fog_params_const; /* PS3 port: fog (q3_vp.vpa), NULL in an old binary */
+    rsxProgramConst    *fog_color_const;
 
     rsxFragmentProgram *fp;
     void               *fp_ucode;
@@ -144,6 +168,10 @@ typedef struct {
     /* Screen fit (overscan): the engine renders into this rect of the
      * surface and sees fit_w x fit_h as its screen. Full surface by default. */
     int                 fit_x, fit_y, fit_w, fit_h;
+    /* The engine always sees screen_w x screen_h: its viewport and scissor
+     * (GL coordinates, kept here) are scaled into the fit rect, so the fit
+     * can change live (menu slider) without a vid_restart. */
+    int                 gl_vp[4], gl_sc[4];
 
     uint32_t            dirty;
 
@@ -210,7 +238,19 @@ typedef struct {
     ps3gl_texture_t     textures[PS3GL_MAX_TEXTURES];
     GLuint              tex_next_name;
 
-    ps3gl_shader_t      shaders[PS3GL_TENV_COUNT];
+    /* [0, TENV_COUNT): without fog; [TENV_COUNT, 2*TENV_COUNT): with fog */
+    ps3gl_shader_t      shaders[2 * PS3GL_TENV_COUNT];
+
+    /* GL fog (glFog*, GL_FOG): the vertex program computes the factor from
+     * the clip w (eye distance), the fog fragment programs blend it in. */
+    struct {
+        int      enabled;
+        GLenum   mode;              /* GL_LINEAR, GL_EXP (GL_EXP2 drawn as GL_EXP) */
+        float    density, start, end;
+        float    color[4];
+        uint32_t gen;               /* bumped on every parameter change */
+    } fog;
+    uint32_t            fog_uploaded_gen;
     int                 active_shader;
     rsxVertexProgram   *active_vp;      /* physical VP currently loaded on RSX; all shader slots share one VP, so this is tracked separately from active_shader (the FP key) */
     uint32_t            mvp_uploaded_gen; /* last ps3gl_get_mvp_generation() value uploaded to active_vp */
@@ -262,6 +302,9 @@ int ps3gl_shader_key(void);
 void ps3gl_shader_select(int key);
 
 /* GL function implementations */
+void ps3gl_Fogf(GLenum pname, GLfloat param);
+void ps3gl_Fogi(GLenum pname, GLint param);
+void ps3gl_Fogfv(GLenum pname, const GLfloat *params);
 void ps3gl_Enable(GLenum cap);
 void ps3gl_Disable(GLenum cap);
 void ps3gl_BlendFunc(GLenum sfactor, GLenum dfactor);

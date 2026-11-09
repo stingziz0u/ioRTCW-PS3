@@ -2984,6 +2984,26 @@ static qboolean CG_PlayerShadow( centity_t *cent, float *shadowPlane ) {
 		return qfalse;
 	}
 
+#ifdef __PS3__
+	// The shadow marks are the expensive part (a trace and up to three
+	// CM_MarkFragments per character per frame: 4 ms with xlabs' crowds).
+	// Skip characters outside the view (with a margin for the shadow's size),
+	// they would not be seen anyway.
+	if ( cg.snap && cent->currentState.number != cg.snap->ps.clientNum ) {
+		vec3_t d;
+		float len, cosLimit;
+
+		VectorSubtract( cent->lerpOrigin, cg.refdef.vieworg, d );
+		len = VectorLength( d );
+		if ( len > 96 ) {
+			cosLimit = cos( DEG2RAD( cg.refdef.fov_x * 0.5f + 25.0f ) );
+			if ( DotProduct( d, cg.refdef.viewaxis[0] ) < len * cosLimit ) {
+				return qfalse;
+			}
+		}
+	}
+#endif
+
 	// send a trace down from the player to the ground
 	VectorCopy( cent->lerpOrigin, end );
 	end[2] -= SHADOW_DISTANCE;

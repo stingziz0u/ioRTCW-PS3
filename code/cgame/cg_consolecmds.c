@@ -276,6 +276,9 @@ void CG_StartCamera( const char *name, qboolean startBlack ) {
 
 	if ( trap_loadCamera( CAM_PRIMARY, va( "cameras/%s", lname ) ) ) {
 		cg.cameraMode = qtrue;				// camera on in cgame
+#if defined( __PS3__ ) && defined( PS3_DIAG )
+		CG_Printf( "[cam] start %s\n", lname );   // the map test counts cinematics
+#endif
 		if ( startBlack ) {
 			CG_Fade( 0, 0, 0, 255, cg.time, 0 );		// go black
 		}
@@ -299,6 +302,11 @@ CG_StopCamera
 ==============
 */
 void CG_StopCamera( void ) {
+#if defined( __PS3__ ) && defined( PS3_DIAG )
+	if ( cg.cameraMode ) {
+		CG_Printf( "[cam] end\n" );
+	}
+#endif
 	cg.cameraMode = qfalse;                 // camera off in cgame
 	trap_SendClientCommand( "stopCamera" );    // camera off in game
 	trap_stopCamera( CAM_PRIMARY );           // camera off in client

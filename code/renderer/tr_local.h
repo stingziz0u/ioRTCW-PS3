@@ -577,6 +577,12 @@ typedef struct {
 
 	glfog_t glFog;                  // fog parameters	//----(SA)	added
 
+#ifdef __PS3__
+	// linear distance fog: everything past its end is drawn in the fog
+	// color, the clear color. This plane culls it (R_SetupFrustum).
+	qboolean fogCull;
+	cplane_t fogPlane;
+#endif
 } viewParms_t;
 
 
@@ -642,7 +648,11 @@ typedef struct srfGridMesh_s {
 	surfaceType_t surfaceType;
 
 	// dynamic lighting information
+#ifdef __PS3__
+	int dlightBits[2];                      // one per SMP frame (backEndData buffer)
+#else
 	int dlightBits;
+#endif
 
 	// culling information
 	vec3_t meshBounds[2];
@@ -671,7 +681,11 @@ typedef struct {
 	cplane_t plane;
 
 	// dynamic lighting information
+#ifdef __PS3__
+	int dlightBits[2];                      // one per SMP frame (backEndData buffer)
+#else
 	int dlightBits;
+#endif
 
 	// triangle definitions (no normals at points)
 	int numPoints;
@@ -687,7 +701,11 @@ typedef struct {
 	surfaceType_t surfaceType;
 
 	// dynamic lighting information
+#ifdef __PS3__
+	int dlightBits[2];                      // one per SMP frame (backEndData buffer)
+#else
 	int dlightBits;
+#endif
 
 	// culling information (FIXME: use this!)
 	vec3_t bounds[2];
@@ -1020,6 +1038,11 @@ typedef struct {
 	qboolean	doneSurfaces;   // done any 3d surfaces already
 #endif
 	trRefEntity_t entity2D;     // currentEntity will point at this when doing 2D rendering
+#ifdef __PS3__
+	int smpFrame;                           // backEndData buffer being drawn
+	glfog_t fog[NUM_FOGS];                  // the drawing view's glfogsettings (RB_DrawSurfs)
+	glfogType_t fogNum;                     // and glfogNum
+#endif
 } backEndState_t;
 
 /*
@@ -1098,6 +1121,9 @@ typedef struct {
 
 	frontEndCounters_t pc;
 	int frontEndMsec;                           // not in pc due to clearing issue
+#ifdef __PS3__
+	int smpFrame;                               // backEndData buffer being filled
+#endif
 
 	//
 	// put large tables at the end, so most elements will be
@@ -1695,6 +1721,9 @@ ANIMATED MODELS
 void R_AddAnimSurfaces( trRefEntity_t *ent );
 void RB_SurfaceAnim( mdsSurface_t *surfType );
 int R_GetBoneTag( orientation_t *outTag, mdsHeader_t *mds, int startTagIndex, const refEntity_t *refent, const char *tagName );
+#ifdef __PS3__
+int PS3_R_GetBoneTagFront( orientation_t *outTag, mdsHeader_t *mds, int startTagIndex, const refEntity_t *refent, const char *tagName );
+#endif
 void R_MDRAddAnimSurfaces( trRefEntity_t *ent );
 void RB_MDRSurfaceAnim( mdrSurface_t *surface );
 qboolean R_LoadIQM (model_t *mod, void *buffer, int filesize, const char *name );
@@ -1825,6 +1854,12 @@ typedef struct {
 	viewParms_t viewParms;
 	drawSurf_t *drawSurfs;
 	int numDrawSurfs;
+#ifdef __PS3__
+	// r_smp: the GL fog of this view, as the front end had it (it keeps
+	// fading FOG_CURRENT for the next frame while the back end draws)
+	glfog_t fog[NUM_FOGS];
+	glfogType_t fogNum;
+#endif
 } drawSurfsCommand_t;
 
 typedef struct {
@@ -1900,6 +1935,31 @@ extern int max_polys;
 extern int max_polyverts;
 
 extern backEndData_t   *backEndData;    // the second one may not be allocated
+#ifdef __PS3__
+// r_smp: the back end runs on the PPU's second hardware thread (ps3_glimp.c)
+extern backEndData_t   *r_smpBackEndData[2];    // backEndData is the front end's one
+extern cvar_t  *r_smp;
+void R_InitCommandBuffers( void );
+void R_ShutdownCommandBuffers( void );
+void R_SMP_VideoMap( int handle );
+void RB_RenderThread( void );
+qboolean GLimp_SpawnRenderThread( void ( *function )( void ) );
+void *GLimp_RendererSleep( void );
+void GLimp_FrontEndSleep( void );
+void GLimp_WakeRenderer( void *data );
+void GLimp_ShutdownRenderThread( void );
+// float -> int rounded like lrintf (ri.ftol), written to memory without
+// reading it back: the PPU stalls on a load right after the store
+// (load-hit-store). Convert a batch, read the ints in a later pass.
+static ID_INLINE void PS3_StoreRoundedInt( float f, int *dst ) {
+	double t;
+
+	__asm__( "fctiw %0,%1" : "=d"( t ) : "d"( f ) );
+	__asm__ volatile( "stfiwx %1,0,%0" : : "r"( dst ), "d"( t ) : "memory" );
+}
+#define SMP_FRONT   ( tr.smpFrame )
+#define SMP_BACK    ( backEnd.smpFrame )
+#endif
 
 void *R_GetCommandBuffer( int bytes );
 void RB_ExecuteRenderCommands( const void *data );

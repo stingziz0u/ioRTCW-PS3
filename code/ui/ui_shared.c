@@ -56,6 +56,9 @@ static itemDef_t *itemCapture = NULL;   // item that has the mouse captured ( if
 displayContextDef_t *DC = NULL;
 
 qboolean g_waitingForKey = qfalse;
+#ifdef __PS3__
+static itemDef_t *s_ps3OskItem;     // field the XMB keyboard is typing (Menus_PS3OskPoll)
+#endif
 qboolean g_editingField = qfalse;
 
 static itemDef_t *g_bindItem = NULL;
@@ -2177,6 +2180,14 @@ qboolean Item_ListBox_HandleKey( itemDef_t *item, int key, qboolean down, qboole
 			}
 		} else {
 			viewmax = ( item->window.rect.h / listPtr->elementHeight );
+#ifdef __PS3__
+			// at either end of a list the pad moves on to the next item
+			if ( !force && !listPtr->notselectable &&
+				 ( ( ( key == K_UPARROW || key == K_KP_UPARROW ) && listPtr->cursorPos <= 0 ) ||
+				   ( ( key == K_DOWNARROW || key == K_KP_DOWNARROW ) && listPtr->cursorPos >= count - 1 ) ) ) {
+				return qfalse;
+			}
+#endif
 			if ( key == K_UPARROW || key == K_KP_UPARROW ) {
 				if ( !listPtr->notselectable ) {
 					listPtr->cursorPos--;
@@ -2908,14 +2919,31 @@ void Item_Action( itemDef_t *item ) {
 #ifdef __PS3__
 /*
 =================
-Item_PadFocusPoint / Item_PadFocusable
+Pad navigation (PS3)
 
-Pad navigation (PS3). A text item only takes the focus while the cursor is on
-its text (Item_SetFocus), so moving the focus with the d-pad has to aim at the
-item itself; the cursor is then warped there so focus and pointer agree.
+The menus were made for a mouse: a text item only takes the focus while the
+cursor is on its text, submenus are separate menuDefs drawn next to their
+parent, and only a mouse click moves the key focus from one menu to another.
+With the pad:
+- the d-pad moves the focus to the nearest item in that direction, across
+  every visible menu (a tab bar in one menuDef, its panel in another);
+- the focus is set directly and the pointer is warped onto the item, so the
+  hover scripts and the item code that checks the pointer follow the pad;
+- the menu that owns the focused item becomes the focused menu, and only
+  that item is highlighted, so X always acts on what is highlighted.
 =================
 */
+void Item_SetTextExtents( itemDef_t *item, int *width, int *height, const char *text );
+static rectDef_t *Item_CorrectedTextRect( itemDef_t *item );
+
+static itemDef_t *padItem;      // last item the pad or the pointer focused
+static int padWarpX = -1, padWarpY = -1;    // where the d-pad last put the pointer
+
 static void Item_PadFocusPoint( itemDef_t *item, float *x, float *y ) {
+	if ( item->type == ITEM_TYPE_TEXT && item->text && item->textRect.w <= 0 ) {
+		int w, h;
+		Item_SetTextExtents( item, &w, &h, NULL );   // not painted yet
+	}
 	if ( item->type == ITEM_TYPE_TEXT && item->textRect.w > 0 ) {
 		// Item_SetFocus tests textRect with y moved up by its height
 		*x = item->textRect.x + item->textRect.w * 0.5f;
@@ -2926,8 +2954,40 @@ static void Item_PadFocusPoint( itemDef_t *item, float *x, float *y ) {
 	}
 }
 
+/*
+A button that only exists under the mouse: a visible item with a mouseEnter
+script and no action, over a hidden item that has the action (the "continue"
+arrow of the mission screens: but2 shows but2_alt on hover).
+*/
+static itemDef_t *Item_PadRevealed( itemDef_t *item ) {
+	menuDef_t *parent = (menuDef_t *)item->parent;
+	float x = item->window.rect.x + item->window.rect.w * 0.5f;
+	float y = item->window.rect.y + item->window.rect.h * 0.5f;
+	int i;
+
+	if ( !item->mouseEnter || item->action || !parent ) {
+		return NULL;
+	}
+	for ( i = 0; i < parent->itemCount; i++ ) {
+		itemDef_t *other = parent->items[i];
+		if ( other != item && other->action && !( other->window.flags & WINDOW_VISIBLE ) &&
+			 Rect_ContainsPoint( &other->window.rect, x, y ) ) {
+			return other;
+		}
+	}
+	return NULL;
+}
+
+#define Item_PadRevealer( item ) ( Item_PadRevealed( item ) != NULL )
+
 static qboolean Item_PadFocusable( itemDef_t *item ) {
+	menuDef_t *parent;
+
 	if ( !item || item->window.flags & WINDOW_DECORATION || !( item->window.flags & WINDOW_VISIBLE ) ) {
+		return qfalse;
+	}
+	parent = (menuDef_t *)item->parent;
+	if ( !parent || !( parent->window.flags & WINDOW_VISIBLE ) ) {
 		return qfalse;
 	}
 	if ( item->cvarFlags & ( CVAR_ENABLE | CVAR_DISABLE ) && !Item_EnableShowViaCvar( item, CVAR_ENABLE ) ) {
@@ -2936,21 +2996,336 @@ static qboolean Item_PadFocusable( itemDef_t *item ) {
 	if ( item->cvarFlags & ( CVAR_SHOW | CVAR_HIDE ) && !Item_EnableShowViaCvar( item, CVAR_SHOW ) ) {
 		return qfalse;
 	}
-	return ( item->action || item->type != ITEM_TYPE_TEXT ) ? qtrue : qfalse;
+	if ( item->window.ownerDrawFlags && DC->ownerDrawVisible && !DC->ownerDrawVisible( item->window.ownerDrawFlags ) ) {
+		return qfalse;
+	}
+	if ( item->action || Item_PadRevealer( item ) ) {
+		return qtrue;
+	}
+	switch ( item->type ) {
+	case ITEM_TYPE_RADIOBUTTON:
+	case ITEM_TYPE_CHECKBOX:
+	case ITEM_TYPE_EDITFIELD:
+	case ITEM_TYPE_COMBO:
+	case ITEM_TYPE_LISTBOX:
+	case ITEM_TYPE_NUMERICFIELD:
+	case ITEM_TYPE_SLIDER:
+	case ITEM_TYPE_YESNO:
+	case ITEM_TYPE_MULTI:
+	case ITEM_TYPE_BIND:
+	case ITEM_TYPE_VALIDFILEFIELD:
+		return qtrue;
+	}
+	return qfalse;  // plain text, images, models, ownerdraw displays
+}
+
+// the focused item of a menu, if it can still be used (a "hide" leaves the
+// focus flag on the hidden item: drop it)
+static itemDef_t *Menu_PadFocusedItem( menuDef_t *menu ) {
+	itemDef_t *focus = NULL;
+	int i;
+
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		if ( menu->items[i]->window.flags & WINDOW_HASFOCUS ) {
+			if ( menu->items[i]->window.flags & WINDOW_VISIBLE ) {
+				focus = menu->items[i];
+			} else {
+				menu->items[i]->window.flags &= ~WINDOW_HASFOCUS;
+			}
+		}
+	}
+	return focus;
+}
+
+// menus the pad can move into from the focused one: a popup keeps the pad
+static qboolean Menu_PadReachable( menuDef_t *focus, menuDef_t *m ) {
+	if ( m == focus ) {
+		return qtrue;
+	}
+	if ( !( m->window.flags & WINDOW_VISIBLE ) ) {
+		return qfalse;
+	}
+	if ( ( focus->window.flags | m->window.flags ) & WINDOW_POPUP ) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+// topmost usable item of a menu under (x, y), or -1
+static int Menu_PadItemAt( menuDef_t *menu, float x, float y );
+
+// hand the key focus to a menu that is already open, without running its
+// onOpen again; the other menus lose their highlighted item
+static void Menu_PadFocusMenu( menuDef_t *menu ) {
+	int i;
+
+	for ( i = 0; i < menuCount; i++ ) {
+		if ( &Menus[i] == menu ) {
+			continue;
+		}
+		Menus[i].window.flags &= ~WINDOW_HASFOCUS;
+		if ( Menus[i].window.flags & WINDOW_VISIBLE ) {
+			if ( Menu_PadFocusedItem( &Menus[i] ) ) {
+				Menu_ClearFocus( &Menus[i] );
+			}
+		}
+	}
+	menu->window.flags |= WINDOW_HASFOCUS;
+}
+
+static void Menu_PadSetItemFocus( menuDef_t *menu, int index ) {
+	itemDef_t *item = menu->items[index];
+
+	if ( !( item->window.flags & WINDOW_HASFOCUS ) ) {
+		Menu_ClearFocus( menu );
+		item->window.flags |= WINDOW_HASFOCUS;
+		if ( item->onFocus ) {
+			Item_RunScript( item, item->onFocus );
+		}
+		DC->startLocalSound( item->focusSound ? item->focusSound : DC->Assets.itemFocusSound, CHAN_LOCAL_SOUND );
+	}
+	menu->cursorItem = index;
+	padItem = item;
 }
 
 static qboolean Menu_PadFocusItem( menuDef_t *menu, int index ) {
 	itemDef_t *item = menu->items[index];
+	itemDef_t *now;
 	float x, y;
 
 	Item_PadFocusPoint( item, &x, &y );
-	if ( Item_SetFocus( item, x, y ) ) {
-		DC->cursorx = (int)x;
-		DC->cursory = (int)y;
-		Menu_HandleMouseMove( menu, x, y );
-		return qtrue;
+	Menu_PadFocusMenu( menu );
+	Menu_PadSetItemFocus( menu, index );
+
+	// move the pointer there: runs the mouseEnter/mouseExit scripts
+	DC->cursorx = (int)x;
+	DC->cursory = (int)y;
+	Display_MouseMove( NULL, (int)x, (int)y );
+
+	// the hover may have handed the focus to an overlapping item (a "_alt"
+	// highlight version of a button is fine; a label or other menu is not)
+	now = Menu_PadFocusedItem( menu );
+	if ( !now || !Item_PadFocusable( now ) || ( !now->action && Item_PadRevealer( now ) ) ) {
+		int under = Menu_PadItemAt( menu, x, y );   // the button the hover revealed
+		if ( under >= 0 ) {
+			Menu_PadSetItemFocus( menu, under );
+		} else if ( Item_PadFocusable( item ) ) {
+			Menu_PadSetItemFocus( menu, index );
+		}
+	}
+	padWarpX = DC->cursorx;
+	padWarpY = DC->cursory;
+	Menu_PadFocusMenu( menu );
+	return qtrue;
+}
+
+// first usable item of a menu, in file order
+static qboolean Menu_PadFocusFirst( menuDef_t *menu ) {
+	int i;
+
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		if ( Item_PadFocusable( menu->items[i] ) ) {
+			return Menu_PadFocusItem( menu, i );
+		}
 	}
 	return qfalse;
+}
+
+/*
+=================
+Menu_PadMove
+
+Nearest usable item in the direction (dx, dy), in any reachable menu; past
+the last one it wraps to the far end of the same row/column.
+=================
+*/
+static void Menu_PadMove( menuDef_t *menu, int dx, int dy ) {
+	itemDef_t *cur = Menu_PadFocusedItem( menu );
+	menuDef_t *best = NULL, *wrap = NULL;
+	int bestIndex = -1, wrapIndex = -1;
+	float bestScore = 0, wrapScore = 0;
+	float px, py;
+	int m, i;
+
+	if ( !cur || !Item_PadFocusable( cur ) ) {
+		Menu_PadFocusFirst( menu );
+		return;
+	}
+	Item_PadFocusPoint( cur, &px, &py );
+
+	for ( m = 0; m < menuCount; m++ ) {
+		menuDef_t *target = &Menus[m];
+
+		if ( !Menu_PadReachable( menu, target ) ) {
+			continue;
+		}
+		for ( i = 0; i < target->itemCount; i++ ) {
+			itemDef_t *it = target->items[i];
+			float qx, qy, along, perp;
+
+			if ( it == cur || !Item_PadFocusable( it ) ) {
+				continue;
+			}
+			Item_PadFocusPoint( it, &qx, &qy );
+			along = ( qx - px ) * dx + ( qy - py ) * dy;
+			perp = ( qx - px ) * dy - ( qy - py ) * dx;
+			if ( perp < 0 ) {
+				perp = -perp;
+			}
+
+			if ( along > 2 && perp <= along * 3 ) {
+				// ahead: closest, preferring the same row/column
+				float score = along + perp * 2;
+				if ( !best || score < bestScore ) {
+					best = target;
+					bestIndex = i;
+					bestScore = score;
+				}
+			} else if ( along < -2 && perp < 24 ) {
+				// behind, same row/column: the farthest one is the wrap target
+				float score = along + perp * 2;
+				if ( !wrap || score < wrapScore ) {
+					wrap = target;
+					wrapIndex = i;
+					wrapScore = score;
+				}
+			}
+		}
+	}
+
+	if ( best ) {
+		Menu_PadFocusItem( best, bestIndex );
+	} else if ( wrap ) {
+		Menu_PadFocusItem( wrap, wrapIndex );
+	}
+}
+
+// is (x, y) on the item? (a text item only on its text, like the mouse)
+static qboolean Item_PadHit( itemDef_t *item, float x, float y ) {
+	if ( item->type == ITEM_TYPE_TEXT && item->text ) {
+		float fx, fy;
+		Item_PadFocusPoint( item, &fx, &fy );   // computes the text extents
+		if ( item->textRect.w > 0 ) {
+			return Rect_ContainsPoint( Item_CorrectedTextRect( item ), x, y );
+		}
+	}
+	return Rect_ContainsPoint( &item->window.rect, x, y );
+}
+
+static int Menu_PadItemAt( menuDef_t *menu, float x, float y ) {
+	int i;
+
+	for ( i = menu->itemCount - 1; i >= 0; i-- ) {  // topmost first
+		itemDef_t *it = menu->items[i];
+		if ( Item_PadFocusable( it ) && !( !it->action && Item_PadRevealer( it ) ) && Item_PadHit( it, x, y ) ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// X on an item: menus that close on a click outside them (the in-game
+// ones) close when X lands outside them, like the mouse does
+static void Menus_PadCloseOthers( menuDef_t *menu, itemDef_t *item ) {
+	float x, y;
+	int i;
+
+	Item_PadFocusPoint( item, &x, &y );
+	for ( i = 0; i < menuCount; i++ ) {
+		menuDef_t *m = &Menus[i];
+		if ( m != menu && ( m->window.flags & ( WINDOW_VISIBLE | WINDOW_OOB_CLICK ) ) == ( WINDOW_VISIBLE | WINDOW_OOB_CLICK ) &&
+			 !Rect_ContainsPoint( &m->window.rect, x, y ) ) {
+			Menu_RunCloseScript( m );
+			m->window.flags &= ~( WINDOW_HASFOCUS | WINDOW_VISIBLE );
+		}
+	}
+}
+
+/*
+=================
+Menus_PadPointerMoved
+
+The pointer (right stick) moved: the usable item under it takes the focus,
+in whatever open menu it is, so the one highlight is always what X acts on.
+Over nothing usable the highlight stays where it was.
+=================
+*/
+void Menus_PadPointerMoved( void ) {
+	menuDef_t *focus = Menu_GetFocused();
+	menuDef_t *owner;
+	itemDef_t *now;
+	int m, i, pass;
+
+	if ( !focus || itemCapture || g_editingField || g_waitingForKey ) {
+		return;
+	}
+	for ( pass = 0; pass < 2; pass++ ) {
+		for ( m = 0; m < menuCount; m++ ) {
+			menuDef_t *menu = &Menus[m];
+
+			if ( ( pass == 0 ) != ( menu == focus ) || !Menu_PadReachable( focus, menu ) ) {
+				continue;
+			}
+			for ( i = menu->itemCount - 1; i >= 0; i-- ) {   // topmost first
+				if ( Item_PadFocusable( menu->items[i] ) && Item_PadHit( menu->items[i], DC->cursorx, DC->cursory ) ) {
+					Menu_PadFocusMenu( menu );
+					Menu_PadSetItemFocus( menu, i );
+					return;
+				}
+			}
+		}
+	}
+
+	// the mouse code may have handed the focus flag to a label or a picture
+	now = Menu_PadFocusedItem( focus );
+	if ( now && !Item_PadFocusable( now ) ) {
+		Menu_ClearFocus( focus );
+		now = NULL;
+	}
+	owner = padItem ? (menuDef_t *)padItem->parent : NULL;
+	if ( !now && owner == focus && Item_PadFocusable( padItem ) ) {
+		padItem->window.flags |= WINDOW_HASFOCUS;
+	}
+	Menu_PadFocusMenu( focus );     // no highlight left in the other menus
+}
+
+// structure of each menu in the log, the first time it opens (the menu
+// scripts live in the user's pk3s). make DIAG=1 has it.
+#if defined( PS3_DIAG ) && !defined( PS3_MENU_DUMP )
+#define PS3_MENU_DUMP
+#endif
+#ifdef PS3_MENU_DUMP
+static void Menu_PadDump( menuDef_t *menu ) {
+	static qboolean dumped[MAX_MENUS];
+	int i, idx = menu - Menus;
+
+	if ( idx < 0 || idx >= MAX_MENUS || dumped[idx] ) {
+		return;
+	}
+	dumped[idx] = qtrue;
+	DC->Print( "[menu] %s: rect %g %g %g %g flags 0x%x fullscreen %d, %d items\n",
+			   menu->window.name ? menu->window.name : "?", menu->window.rect.x, menu->window.rect.y,
+			   menu->window.rect.w, menu->window.rect.h, menu->window.flags, menu->fullScreen, menu->itemCount );
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		itemDef_t *it = menu->items[i];
+
+		DC->Print( "[menu]  %d %s/%s type %d rect %g %g %g %g flags 0x%x text \"%.40s\" cvar %s action {%.120s}\n",
+				   i, it->window.name ? it->window.name : "-", it->window.group ? it->window.group : "-",
+				   it->type, it->window.rect.x, it->window.rect.y, it->window.rect.w, it->window.rect.h,
+				   it->window.flags, it->text ? it->text : "", it->cvar ? it->cvar : "-",
+				   it->action ? it->action : "" );
+	}
+}
+#endif
+
+// after X ran an action: if the focused menu (maybe a new one) has nothing
+// highlighted, highlight its first item so the pad always has a place to be
+static void Menus_PadRefocus( void ) {
+	menuDef_t *focus = Menu_GetFocused();
+
+	if ( focus && !g_editingField && !g_waitingForKey && !Menu_PadFocusedItem( focus ) ) {
+		Menu_PadFocusFirst( focus );
+	}
 }
 #endif
 
@@ -3198,6 +3573,7 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 		return;
 	}
 
+
 	// see if the mouse is within the window bounds and if so is this a mouse click
 	if ( down && !( menu->window.flags & WINDOW_POPUP ) && !Rect_ContainsPoint( &menu->window.rect, DC->cursorx, DC->cursory ) ) {
 		static qboolean inHandleKey = qfalse;
@@ -3214,11 +3590,44 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 	}
 
 	// get the item with focus
+#ifdef __PS3__
+	item = Menu_PadFocusedItem( menu );   // never a hidden one
+	if ( key == K_ENTER || key == K_KP_ENTER ) {
+		if ( item && !Item_PadFocusable( item ) ) {
+			item = NULL;    // hovered picture or label: X does not act on it
+		}
+		if ( down && item && !item->action && Item_PadRevealer( item ) ) {
+			// the arrow that the hover reveals: put the pointer on it
+			for ( i = 0; i < menu->itemCount && menu->items[i] != item; i++ ) {
+			}
+			Menu_PadFocusItem( menu, i );
+			item = Menu_PadFocusedItem( menu );
+			if ( item && !item->action && Item_PadRevealed( item ) ) {
+				item = Item_PadRevealed( item );    // the hover did not show it: act anyway
+			}
+		}
+		if ( down && item && item->type == ITEM_TYPE_SLIDER &&
+			 ( DC->cursorx != padWarpX || DC->cursory != padWarpY ) &&
+			 DC->cursorx < Item_Slider_ThumbPosition( item ) ) {
+			key = K_LEFTARROW;  // pointer left of the knob: X lowers the value
+		}
+		if ( down && item ) {
+			Menus_PadCloseOthers( menu, item );
+		}
+#ifdef PS3_DIAG
+		if ( down ) {
+			DC->Print( "[pad] X in %s on %s (type %d)\n", menu->window.name ? menu->window.name : "?",
+					   item ? ( item->window.name ? item->window.name : "unnamed" ) : "nothing", item ? item->type : -1 );
+		}
+#endif
+	}
+#else
 	for ( i = 0; i < menu->itemCount; i++ ) {
 		if ( menu->items[i]->window.flags & WINDOW_HASFOCUS ) {
 			item = menu->items[i];
 		}
 	}
+#endif
 
 	if ( item != NULL ) {
 		if ( Item_HandleKey( item, key, down ) ) {
@@ -3258,6 +3667,16 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 	case K_UPARROW:
 	case K_LEFTARROW:
 	case K_MWHEELUP:
+#ifdef __PS3__
+		if ( key != K_MWHEELUP ) {
+			if ( key == K_LEFTARROW ) {
+				Menu_PadMove( menu, -1, 0 );
+			} else {
+				Menu_PadMove( menu, 0, -1 );
+			}
+			break;
+		}
+#endif
 		Menu_SetPrevCursorItem( menu );
 		break;
 
@@ -3266,6 +3685,9 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 			itemDef_t it;
 			it.parent = menu;
 			Item_RunScript( &it, menu->onESC );
+#ifdef __PS3__
+			Menus_PadRefocus();
+#endif
 		}
 		break;
 
@@ -3274,6 +3696,16 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 	case K_DOWNARROW:
 	case K_RIGHTARROW:
 	case K_MWHEELDOWN:
+#ifdef __PS3__
+		if ( key != K_TAB && key != K_MWHEELDOWN ) {
+			if ( key == K_RIGHTARROW ) {
+				Menu_PadMove( menu, 1, 0 );
+			} else {
+				Menu_PadMove( menu, 0, 1 );
+			}
+			break;
+		}
+#endif
 		Menu_SetNextCursorItem( menu );
 		break;
 
@@ -3322,30 +3754,73 @@ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
 	case K_ENTER:
 	case K_MOUSE3:
 		if ( item ) {
+#ifdef __PS3__
+			// the pad cannot type: X on a text field with an action (the save
+			// name) opens the XMB keyboard for its cvar (ps3_osk.c); when it
+			// closes, Menus_PS3OskPoll runs the action (an empty name gets
+			// the automatic one). A USB keyboard still edits it with the
+			// pointer click (square).
+			if ( ( item->type == ITEM_TYPE_EDITFIELD || item->type == ITEM_TYPE_NUMERICFIELD || item->type == ITEM_TYPE_VALIDFILEFIELD ) &&
+				 item->action && ( key == K_ENTER || key == K_KP_ENTER ) ) {
+				if ( item->cvar && !s_ps3OskItem ) {
+					s_ps3OskItem = item;
+					DC->setCVar( "ps3_osk_result", "0" );
+					DC->executeText( EXEC_APPEND, va( "ps3_osk %s \"Save name\"\n", item->cvar ) );
+				} else if ( !item->cvar ) {
+					Item_Action( item );
+				}
+			} else
+#endif
 			if ( item->type == ITEM_TYPE_EDITFIELD || item->type == ITEM_TYPE_NUMERICFIELD || item->type == ITEM_TYPE_VALIDFILEFIELD ) {
 				item->cursorPos = 0;
 				g_editingField = qtrue;
 				g_editItem = item;
 			} else {
+#ifdef __PS3__
+				if ( item->type == ITEM_TYPE_LISTBOX && !item->action && item->typeData &&
+					 ( (listBoxDef_t *)item->typeData )->doubleClick ) {
+					// X on a list = double click on the selected entry
+					Item_RunScript( item, ( (listBoxDef_t *)item->typeData )->doubleClick );
+				} else
+#endif
 				Item_Action( item );
 			}
 		}
 #ifdef __PS3__
-		else if ( key == K_ENTER ) {
+		else if ( key == K_ENTER || key == K_KP_ENTER ) {
 			// pad confirm with nothing focused: focus the first item; if it is
-			// the only one (the briefing's "continue"), activate it right away
-			int focusable = 0;
+			// the only one that does something (the "continue" arrow of the
+			// mission screens), activate it right away
+			int actions = 0, first = -1, only = -1;
 
 			for ( i = 0; i < menu->itemCount; i++ ) {
 				if ( Item_PadFocusable( menu->items[i] ) ) {
-					focusable++;
+					if ( first < 0 ) {
+						first = i;
+					}
+					actions++;
+					only = i;
 				}
 			}
-			menu->cursorItem = -1;
-			item = Menu_SetNextCursorItem( menu );
-			if ( item && focusable == 1 ) {
-				Item_Action( item );
+			if ( actions == 1 ) {
+				Menu_PadFocusItem( menu, only );
+				item = Menu_PadFocusedItem( menu );     // the revealed button, if any
+				if ( item && !item->action && Item_PadRevealed( item ) ) {
+					item = Item_PadRevealed( item );
+				}
+#ifdef PS3_DIAG
+				DC->Print( "[pad] X: only item %s -> %s\n", menu->items[only]->window.name ? menu->items[only]->window.name : "?",
+						   item && item->window.name ? item->window.name : "?" );
+#endif
+				if ( item && item->action ) {
+					Item_Action( item );
+				}
+			} else if ( first >= 0 ) {
+				Menu_PadFocusItem( menu, first );
 			}
+		}
+		if ( key == K_ENTER || key == K_KP_ENTER ) {
+			Menus_PadRefocus();
 		}
 #endif
 		break;
@@ -4820,6 +5295,9 @@ menuDef_t *Menus_ActivateByName( const char *p ) {
 	for ( i = 0; i < menuCount; i++ ) {
 		if ( Q_stricmp( Menus[i].window.name, p ) == 0 ) {
 			m = &Menus[i];
+#if defined( __PS3__ ) && defined( PS3_MENU_DUMP )
+			Menu_PadDump( m );
+#endif
 			Menus_Activate( m );
 			if ( openMenuCount < MAX_OPEN_MENUS && focus != NULL ) {
 				menuStack[openMenuCount++] = focus;
@@ -5991,6 +6469,32 @@ vidmode_t r_vidModes[] =
 };
 static int	s_numVidModes = ARRAY_LEN( r_vidModes );
 
+#ifdef __PS3__
+/*
+cg_drawCrosshair as a list: 0 = none, n = gfx/2d/crosshair('a' + n % 10),
+so 1..9 are b..j and 10 is a: Off + 1..10 reach all ten.
+*/
+static void Item_PS3CrosshairList( itemDef_t *item ) {
+	multiDef_t *multiPtr = UI_Alloc( sizeof( multiDef_t ) );
+	int i;
+
+	if ( !multiPtr ) {
+		return;
+	}
+	memset( multiPtr, 0, sizeof( multiDef_t ) );
+	multiPtr->cvarList[0] = String_Alloc( "Off" );
+	multiPtr->cvarValue[0] = 0;
+	for ( i = 1; i <= 10; i++ ) {
+		multiPtr->cvarList[i] = String_Alloc( va( "%d", i ) );
+		multiPtr->cvarValue[i] = i;
+	}
+	multiPtr->count = 11;
+	multiPtr->strDef = qfalse;
+	item->type = ITEM_TYPE_MULTI;
+	item->typeData = multiPtr;
+}
+#endif
+
 /*
 ===============
 UI_ApplyItemHacks
@@ -5999,6 +6503,60 @@ Hacks to fix issues with menu scripts
 ===============
 */
 static void Item_ApplyHacks( itemDef_t *item ) {
+
+#ifdef __PS3__
+	// a crosshair on/off switch, if a menu has one, picks the crosshair
+	if ( item->type == ITEM_TYPE_YESNO && item->cvar && !Q_stricmp( item->cvar, "cg_drawCrosshair" ) ) {
+		Item_PS3CrosshairList( item );
+	}
+#endif
+
+#ifdef __PS3__
+	// the mouse look settings drive the stick on PS3 (CL_JoystickMove)
+	if ( item->text && item->cvar && ( !Q_stricmp( item->cvar, "sensitivity" ) || !Q_stricmp( item->cvar, "m_pitch" ) ) ) {
+		const char *word = !Q_stricmp( item->cvar, "sensitivity" ) ? "Gamepad" : "Look";
+		const char *at = Q_stristr( item->text, "mouse" );
+
+		// 1..10 with the default in the middle (the menu had 1..50)
+		if ( item->type == ITEM_TYPE_SLIDER && item->typeData && !Q_stricmp( item->cvar, "sensitivity" ) ) {
+			editFieldDef_t *editPtr = (editFieldDef_t *)item->typeData;
+			editPtr->minVal = 1;
+			editPtr->maxVal = 10;
+			editPtr->defVal = 5;
+		}
+		if ( at && item->text[0] != '@' ) {   // not a translation key
+			char buf[256], up[16];
+			int j;
+
+			Q_strncpyz( up, word, sizeof( up ) );
+			if ( at[1] == 'O' ) {   // "MOUSE": keep the caps
+				for ( j = 0; up[j]; j++ ) {
+					if ( up[j] >= 'a' && up[j] <= 'z' ) {
+						up[j] -= 'a' - 'A';
+					}
+				}
+			}
+			Com_sprintf( buf, sizeof( buf ), "%.*s%s%s", (int)( at - item->text ), item->text, up, at + 5 );
+			item->text = String_Alloc( buf );
+		}
+	}
+#endif
+
+#ifdef __PS3__
+	// "Fullscreen" means nothing on PS3: it becomes the TV overscan slider
+	// (vid_ps3_screenfit, applied live by ps3gl)
+	if ( item->type == ITEM_TYPE_YESNO && item->cvar && !Q_stricmp( item->cvar, "r_fullscreen" ) && item->typeData ) {
+		editFieldDef_t *editPtr = (editFieldDef_t *)item->typeData;
+
+		item->type = ITEM_TYPE_SLIDER;
+		item->cvar = String_Alloc( "vid_ps3_screenfit" );
+		item->text = String_Alloc( "Screen Fit:" );
+		item->action = NULL;
+		editPtr->minVal = 70;
+		editPtr->maxVal = 100;
+		editPtr->defVal = 88;
+	}
+#endif
 
 	// Add video modes to system menu
 	if ( item->type == ITEM_TYPE_MULTI && item->cvar && !Q_stricmp( item->cvar, "r_mode" ) ) {
@@ -6520,6 +7078,203 @@ qboolean Menu_Parse( int handle, menuDef_t *menu ) {
 	return qfalse;
 }
 
+#ifdef __PS3__
+/*
+Options the menu scripts don't have, added as rows under the last row of
+a section of Game Options (View: the crosshair, Performance: the blob
+shadows). The scripts are in the user's pk3s, so nothing here knows their
+layout: a section is the items named (or grouped) like the "show <name>"
+of its tab button, the new row copies the look of the section's last
+settings row and goes one row pitch below it, and a place where it would
+cover something that is on screen with the section is skipped for the
+next one down. Each try is logged ([ui]).
+*/
+static qboolean Rect_PS3Overlap( const rectDef_t *a, const rectDef_t *b ) {
+	return a->x < b->x + b->w && b->x < a->x + a->w && a->y < b->y + b->h && b->y < a->y + a->h;
+}
+
+static qboolean Rect_PS3Contains( const rectDef_t *outer, const rectDef_t *in ) {
+	return outer->x <= in->x && outer->y <= in->y &&
+		   outer->x + outer->w >= in->x + in->w && outer->y + outer->h >= in->y + in->h;
+}
+
+static qboolean Item_PS3InSection( const itemDef_t *it, const char *section ) {
+	return ( it->window.name && !Q_stricmp( it->window.name, section ) ) ||
+		   ( it->window.group && !Q_stricmp( it->window.group, section ) );
+}
+
+static qboolean Item_PS3IsRow( const itemDef_t *it ) {
+	return it->cvar && ( it->type == ITEM_TYPE_YESNO || it->type == ITEM_TYPE_MULTI || it->type == ITEM_TYPE_SLIDER );
+}
+
+static qboolean Menu_PS3HasCvar( const menuDef_t *menu, const char *cvar ) {
+	int i;
+
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		if ( menu->items[i]->cvar && !Q_stricmp( menu->items[i]->cvar, cvar ) ) {
+			return qtrue;
+		}
+	}
+	return qfalse;
+}
+
+// "Crosshair" written like the row it is copied from: caps, colon
+static const char *Item_PS3RowText( const itemDef_t *like, const char *text ) {
+	char buf[64];
+	const char *t = like->text;
+	qboolean caps = qfalse, colon = qtrue;
+	int j, n;
+
+	if ( t && t[0] && t[0] != '@' ) {   // not a translation key
+		caps = qtrue;
+		for ( j = 0; t[j]; j++ ) {
+			if ( t[j] >= 'a' && t[j] <= 'z' ) {
+				caps = qfalse;
+			}
+		}
+		n = strlen( t );
+		colon = ( n > 0 && t[n - 1] == ':' ) || ( n > 1 && t[n - 2] == ':' );
+	}
+	Com_sprintf( buf, sizeof( buf ), "%s%s", text, colon ? ":" : "" );
+	if ( caps ) {
+		for ( j = 0; buf[j]; j++ ) {
+			if ( buf[j] >= 'a' && buf[j] <= 'z' ) {
+				buf[j] -= 'a' - 'A';
+			}
+		}
+	}
+	return String_Alloc( buf );
+}
+
+static itemDef_t *Menu_PS3AddRow( menuDef_t *menu, const char *section, const char *text, const char *cvar, int type ) {
+	const char *mname = menu->window.name ? menu->window.name : "?";
+	itemDef_t *last = NULL, *clash = NULL, *item;
+	float step = 0, bottom;
+	rectDef_t r;
+	int i, j, tries;
+
+	if ( Menu_PS3HasCvar( menu, cvar ) ) {
+		return NULL;    // the script has it already
+	}
+
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		itemDef_t *it = menu->items[i];
+
+		if ( Item_PS3InSection( it, section ) && Item_PS3IsRow( it ) &&
+			 ( !last || it->window.rectClient.y > last->window.rectClient.y ) ) {
+			last = it;
+		}
+	}
+	if ( !last ) {
+		return NULL;    // no such section in this menu
+	}
+
+	// the row pitch: the smallest gap between two rows (two rows can share
+	// a place when a cvarTest shows one or the other)
+	for ( i = 0; i < menu->itemCount; i++ ) {
+		for ( j = 0; j < menu->itemCount; j++ ) {
+			itemDef_t *a = menu->items[i], *b = menu->items[j];
+			float d = b->window.rectClient.y - a->window.rectClient.y;
+
+			if ( Item_PS3InSection( a, section ) && Item_PS3IsRow( a ) &&
+				 Item_PS3InSection( b, section ) && Item_PS3IsRow( b ) &&
+				 d >= 8 && ( step == 0 || d < step ) ) {
+				step = d;
+			}
+		}
+	}
+	if ( step == 0 ) {
+		step = last->window.rectClient.h + 3;
+	}
+
+	bottom = menu->fullScreen ? 480 : menu->window.rect.h;
+	r = last->window.rectClient;
+	for ( tries = 0; tries < 4; tries++ ) {
+		r.y += step;
+		clash = NULL;
+		if ( r.y + r.h > bottom ) {
+			break;
+		}
+		for ( i = 0; i < menu->itemCount && !clash; i++ ) {
+			itemDef_t *it = menu->items[i];
+
+			if ( !Rect_PS3Overlap( &it->window.rectClient, &r ) ) {
+				continue;
+			}
+			// a frame or background around the rows
+			if ( Rect_PS3Contains( &it->window.rectClient, &r ) && it->window.rectClient.h > 2 * r.h ) {
+				continue;
+			}
+			// another tab's rows: never on screen with this section
+			if ( !Item_PS3InSection( it, section ) && last->window.group && it->window.group &&
+				 !Q_stricmp( it->window.group, last->window.group ) ) {
+				continue;
+			}
+			if ( Item_PS3InSection( it, section ) || ( it->window.flags & WINDOW_VISIBLE ) ) {
+				clash = it;
+			}
+		}
+		if ( !clash ) {
+			break;
+		}
+	}
+
+	if ( clash || r.y + r.h > bottom || menu->itemCount >= MAX_MENUITEMS ) {
+		DC->Print( "[ui] %s: no room for %s under '%s' (last row \"%s\" at y %g, pitch %g%s%s)\n",
+				   mname, cvar, section, last->text ? last->text : "", last->window.rectClient.y, step,
+				   clash ? ", covers " : "", clash ? ( clash->window.name ? clash->window.name : "-" ) : "" );
+		return NULL;
+	}
+
+	item = UI_Alloc( sizeof( itemDef_t ) );
+	if ( !item ) {
+		return NULL;
+	}
+	*item = *last;      // the look of the section's rows
+	item->window.rectClient = r;
+	item->window.flags &= ~( WINDOW_HASFOCUS | WINDOW_MOUSEOVER | WINDOW_MOUSEOVERTEXT );
+	item->window.ownerDraw = 0;
+	item->window.ownerDrawFlags = 0;
+	item->textRect.w = item->textRect.h = 0;
+	item->text = Item_PS3RowText( last, text );
+	item->cvar = String_Alloc( cvar );
+	item->cvarTest = NULL;
+	item->enableCvar = NULL;
+	item->cvarFlags = 0;
+	item->action = item->onAccept = item->onFocus = item->leaveFocus = NULL;
+	item->mouseEnter = item->mouseExit = item->mouseEnterText = item->mouseExitText = NULL;
+	item->numColors = 0;
+	item->special = 0;
+	item->cursorPos = 0;
+	item->asset = 0;
+	item->type = type;
+	item->typeData = NULL;
+	Item_ValidateTypeData( item );
+	if ( !item->typeData ) {
+		return NULL;
+	}
+	item->parent = menu;
+	menu->items[menu->itemCount++] = item;
+
+	DC->Print( "[ui] %s: \"%s\" added to '%s' at %g %g (pitch %g, under \"%s\")\n",
+			   mname, item->text, section, r.x, r.y, step, last->text ? last->text : "" );
+	return item;
+}
+
+static void Menu_PS3AddOptions( menuDef_t *menu ) {
+	itemDef_t *item;
+
+	item = Menu_PS3AddRow( menu, "view", "Crosshair", "cg_drawCrosshair", ITEM_TYPE_MULTI );
+	if ( item ) {
+		Item_PS3CrosshairList( item );
+	}
+
+	// cg_shadows: 1 = blob shadows under the characters (the renderer's
+	// "r_shadows" reads cg_shadows in RTCW)
+	Menu_PS3AddRow( menu, "performance", "Shadows", "cg_shadows", ITEM_TYPE_YESNO );
+}
+#endif
+
 /*
 ===============
 Menu_New
@@ -6531,6 +7286,9 @@ void Menu_New( int handle ) {
 	if ( menuCount < MAX_MENUS ) {
 		Menu_Init( menu );
 		if ( Menu_Parse( handle, menu ) ) {
+#ifdef __PS3__
+			Menu_PS3AddOptions( menu );
+#endif
 			Menu_PostParse( menu );
 			menuCount++;
 		}
@@ -6541,8 +7299,47 @@ int Menu_Count( void ) {
 	return menuCount;
 }
 
+#ifdef __PS3__
+/*
+The field whose text the XMB keyboard is typing (see Menu_HandleKey), and
+its end: ps3_osk_result 1 = accepted, 2 = canceled, 3 = no keyboard.
+Accepted or unavailable runs the field's action (the save), canceled not.
+*/
+static void Menus_PS3OskPoll( void ) {
+	int result;
+
+	if ( !s_ps3OskItem ) {
+		return;
+	}
+	result = (int)DC->getCVarValue( "ps3_osk_result" );
+	if ( !result ) {
+		return;
+	}
+	if ( result != 2 && s_ps3OskItem->action ) {
+		Item_Action( s_ps3OskItem );
+	}
+	s_ps3OskItem = NULL;
+	DC->setCVar( "ps3_osk_result", "0" );
+}
+#endif
+
 void Menu_PaintAll( void ) {
 	int i;
+
+#ifdef __PS3__
+	Menus_PS3OskPoll();
+
+	// tell the pad code (ps3_input.c) when a Controls item waits for a key:
+	// then every button arrives as its own key instead of Enter/Escape/arrows
+	{
+		static int lastWaiting = -1;
+
+		if ( g_waitingForKey != lastWaiting ) {
+			lastWaiting = g_waitingForKey;
+			DC->setCVar( "ui_ps3bindwait", g_waitingForKey ? "1" : "0" );
+		}
+	}
+#endif
 	if ( captureFunc ) {
 		captureFunc( captureData );
 	}

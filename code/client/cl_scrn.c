@@ -530,7 +530,15 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			break;
 		case CA_ACTIVE:
 			// always supply STEREO_CENTER as vieworg offset is now done by the engine.
+#ifdef __PS3__
+			{
+				unsigned long long t0 = PS3_ProfTick();
+				CL_CGameRendering( stereoFrame );
+				PS3_ProfAdd( PS3_PROF_CGAME, PS3_ProfTick() - t0 );
+			}
+#else
 			CL_CGameRendering( stereoFrame );
+#endif
 			SCR_DrawDemoRecording();
 #ifdef USE_VOIP
 			SCR_DrawVoipMeter();

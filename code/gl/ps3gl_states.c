@@ -91,6 +91,8 @@ static void enable_disable(GLenum cap, int val)
         ps3gl.tmu[ps3gl.active_tmu].enabled = val;
         break;
     case GL_FOG:
+        ps3gl.fog.enabled = val;    /* picks the fog fragment programs */
+        break;
     case GL_MULTISAMPLE:
     case GL_NORMALIZE:
     case GL_POLYGON_OFFSET_LINE:
@@ -103,11 +105,19 @@ static void enable_disable(GLenum cap, int val)
     }
 }
 
-void ps3gl_Enable(GLenum cap)  { enable_disable(cap, 1); }
-void ps3gl_Disable(GLenum cap) { enable_disable(cap, 0); }
-
+void ps3gl_Enable(GLenum cap)
+{
+    PS3GL_FRONT_CHECK();
+    enable_disable(cap, 1);
+}
+void ps3gl_Disable(GLenum cap)
+{
+    PS3GL_FRONT_CHECK();
+    enable_disable(cap, 0);
+}
 void ps3gl_BlendFunc(GLenum sfactor, GLenum dfactor)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl.rs.blend_src = gl_to_gcm_blend(sfactor);
     ps3gl.rs.blend_dst = gl_to_gcm_blend(dfactor);
     ps3gl.dirty |= PS3GL_DIRTY_BLEND;
@@ -129,6 +139,7 @@ void ps3gl_DepthFunc(GLenum func)
 
 void ps3gl_DepthMask(GLboolean flag)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl.rs.depth_mask = flag ? 1 : 0;
     ps3gl.dirty |= PS3GL_DIRTY_DEPTH;
 }
@@ -166,29 +177,47 @@ void ps3gl_FrontFace(GLenum mode)
     ps3gl.dirty |= PS3GL_DIRTY_CULL;
 }
 
+/* A GL rect (Y=0 at the bottom of the engine's screen_w x screen_h screen)
+ * into the RSX surface (Y=0 at the top), scaled into the screen-fit rect. */
+static void ps3gl_map_rect(const int *r, int16_t *ox, int16_t *oy, uint16_t *ow, uint16_t *oh)
+{
+    int sw = ps3gl.screen_w ? (int)ps3gl.screen_w : 1;
+    int sh = ps3gl.screen_h ? (int)ps3gl.screen_h : 1;
+    int top = sh - r[1] - r[3];     /* GL bottom-up -> RSX top-down */
+    int x0 = ps3gl.fit_x + (r[0] * ps3gl.fit_w + sw / 2) / sw;
+    int x1 = ps3gl.fit_x + ((r[0] + r[2]) * ps3gl.fit_w + sw / 2) / sw;
+    int y0 = ps3gl.fit_y + (top * ps3gl.fit_h + sh / 2) / sh;
+    int y1 = ps3gl.fit_y + ((top + r[3]) * ps3gl.fit_h + sh / 2) / sh;
+
+    *ox = (int16_t)x0;
+    *oy = (int16_t)y0;
+    *ow = (uint16_t)(x1 > x0 ? x1 - x0 : 0);
+    *oh = (uint16_t)(y1 > y0 ? y1 - y0 : 0);
+}
+
 void ps3gl_Scissor(GLint x, GLint y, GLsizei w, GLsizei h)
 {
-    /* Same GL→RSX Y conversion as ps3gl_Viewport, inside the fit rect. */
-    int rsx_y = ps3gl.fit_h - y - (int)h;
-
-    ps3gl.rs.scissor_x = (int16_t)(x + ps3gl.fit_x);
-    ps3gl.rs.scissor_y = (int16_t)(rsx_y + ps3gl.fit_y);
-    ps3gl.rs.scissor_w = (uint16_t)w;
-    ps3gl.rs.scissor_h = (uint16_t)h;
+    PS3GL_FRONT_CHECK();
+    ps3gl.gl_sc[0] = x;
+    ps3gl.gl_sc[1] = y;
+    ps3gl.gl_sc[2] = w;
+    ps3gl.gl_sc[3] = h;
+    ps3gl_map_rect(ps3gl.gl_sc, &ps3gl.rs.scissor_x, &ps3gl.rs.scissor_y,
+                   &ps3gl.rs.scissor_w, &ps3gl.rs.scissor_h);
     ps3gl.dirty |= PS3GL_DIRTY_SCISSOR;
 }
 
 void ps3gl_Viewport(GLint x, GLint y, GLsizei w, GLsizei h)
 {
-    /* ioq3 viewport Y is GL-convention (Y=0 at bottom); RSX framebuffer has Y=0 at top --
-     * convert with rsx_y = screen_h - gl_y - h. No-op for full-screen viewports (y=0, h=screen_h). */
-    int rsx_y = ps3gl.fit_h - y - (int)h;
-
-    /* screen fit: the engine's screen is the fit rect of the surface */
-    ps3gl.rs.vp_x = (int16_t)(x + ps3gl.fit_x);
-    ps3gl.rs.vp_y = (int16_t)(rsx_y + ps3gl.fit_y);
-    ps3gl.rs.vp_w = (uint16_t)w;
-    ps3gl.rs.vp_h = (uint16_t)h;
+    PS3GL_FRONT_CHECK();
+    /* ioq3 viewport Y is GL-convention (Y=0 at bottom); the RSX surface has
+     * Y=0 at top. Screen fit: scaled into the fit rect (ps3gl_map_rect). */
+    ps3gl.gl_vp[0] = x;
+    ps3gl.gl_vp[1] = y;
+    ps3gl.gl_vp[2] = w;
+    ps3gl.gl_vp[3] = h;
+    ps3gl_map_rect(ps3gl.gl_vp, &ps3gl.rs.vp_x, &ps3gl.rs.vp_y,
+                   &ps3gl.rs.vp_w, &ps3gl.rs.vp_h);
     ps3gl.dirty |= PS3GL_DIRTY_VIEWPORT;
 }
 
@@ -255,6 +284,7 @@ void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist)
 
 void ps3gl_ClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a)
 {
+    PS3GL_FRONT_CHECK();
     uint32_t ri = (uint32_t)(r * 255.0f);
     uint32_t gi = (uint32_t)(g * 255.0f);
     uint32_t bi = (uint32_t)(b * 255.0f);
@@ -274,6 +304,7 @@ void ps3gl_ClearStencil(GLint s)
 
 void ps3gl_Clear(GLbitfield mask)
 {
+    PS3GL_FRONT_CHECK();
     gcmContextData *ctx = ps3gl_get_ctx();
     if (!ctx) return;
     uint32_t gcm_mask = 0;
@@ -301,6 +332,11 @@ void ps3gl_set_fit(int x, int y, int w, int h)
     ps3gl.fit_y = y;
     ps3gl.fit_w = w;
     ps3gl.fit_h = h;
+    /* the engine's current viewport and scissor, into the new rect */
+    ps3gl_map_rect(ps3gl.gl_vp, &ps3gl.rs.vp_x, &ps3gl.rs.vp_y,
+                   &ps3gl.rs.vp_w, &ps3gl.rs.vp_h);
+    ps3gl_map_rect(ps3gl.gl_sc, &ps3gl.rs.scissor_x, &ps3gl.rs.scissor_y,
+                   &ps3gl.rs.scissor_w, &ps3gl.rs.scissor_h);
     ps3gl.dirty |= PS3GL_DIRTY_VIEWPORT | PS3GL_DIRTY_SCISSOR;
 }
 
@@ -380,6 +416,64 @@ void ps3gl_states_init(void)
 {
     /* Push full state to RSX on first frame */
     ps3gl.dirty = PS3GL_DIRTY_ALL;
+
+    /* GL defaults */
+    ps3gl.fog.enabled = 0;
+    ps3gl.fog.mode = GL_EXP;
+    ps3gl.fog.density = 1.0f;
+    ps3gl.fog.start = 0.0f;
+    ps3gl.fog.end = 1.0f;
+    ps3gl.fog.color[0] = ps3gl.fog.color[1] = ps3gl.fog.color[2] = ps3gl.fog.color[3] = 0.0f;
+    ps3gl.fog.gen++;
+}
+
+/* ---- Fog (PS3 port) -------------------------------------------------------
+ * Only the state; the vertex program constants go up in ps3gl_apply_shader
+ * when a fogged draw needs them. */
+
+/* RTCW sets all of them before every shader batch (R_Fog): only a real
+ * change re-uploads the constants */
+#define PS3GL_FOG_SET(field, v) do { \
+    if (ps3gl.fog.field != (v)) { ps3gl.fog.field = (v); ps3gl.fog.gen++; } \
+} while (0)
+
+void ps3gl_Fogf(GLenum pname, GLfloat param)
+{
+    switch (pname) {
+    case GL_FOG_MODE:
+        PS3GL_FOG_SET(mode, (GLenum)param);
+        break;
+    case GL_FOG_DENSITY:
+        PS3GL_FOG_SET(density, param);
+        break;
+    case GL_FOG_START:
+        PS3GL_FOG_SET(start, param);
+        break;
+    case GL_FOG_END:
+        PS3GL_FOG_SET(end, param);
+        break;
+    default:
+        break;                      /* GL_FOG_INDEX, GL_FOG_DISTANCE_MODE_NV... */
+    }
+}
+
+void ps3gl_Fogi(GLenum pname, GLint param)
+{
+    ps3gl_Fogf(pname, (GLfloat)param);
+}
+
+void ps3gl_Fogfv(GLenum pname, const GLfloat *params)
+{
+    if (!params)
+        return;
+    if (pname == GL_FOG_COLOR) {
+        PS3GL_FOG_SET(color[0], params[0]);
+        PS3GL_FOG_SET(color[1], params[1]);
+        PS3GL_FOG_SET(color[2], params[2]);
+        PS3GL_FOG_SET(color[3], params[3]);
+    } else {
+        ps3gl_Fogf(pname, params[0]);
+    }
 }
 
 void ps3gl_states_shutdown(void) {}

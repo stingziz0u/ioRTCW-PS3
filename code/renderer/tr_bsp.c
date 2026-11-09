@@ -2158,6 +2158,12 @@ void RE_LoadWorldMap( const char *name ) {
 	} buffer;
 	byte        *startMarker;
 
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		R_IssuePendingRenderCommands(); // r_smp: tr.world changes under the back end
+	}
+#endif
+
 	skyboxportal = 0;
 
 	if ( tr.worldMapLoaded ) {

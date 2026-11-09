@@ -2106,7 +2106,12 @@ int R_LerpTag( orientation_t *tag, const refEntity_t *refent, const char *tagNam
 		R_GetTag( (byte *)model->md3[0], endFrame, tagName, startIndex, &end );
 	} else if ( model->type == MOD_MDS ) {    // use bone lerping
 
+#ifdef __PS3__
+		// game thread: its own copy of the bone state (tr_animation_front.c)
+		retval = PS3_R_GetBoneTagFront( tag, model->mds, startIndex, refent, tagNameIn );
+#else
 		retval = R_GetBoneTag( tag, model->mds, startIndex, refent, tagNameIn );
+#endif
 
 		if ( retval >= 0 ) {
 			return retval;

@@ -124,6 +124,9 @@ cvar_t  *r_ati_fsaa_samples;        //DAJ valids are 1, 2, 4
 #endif
 
 cvar_t  *r_ignoreGLErrors;
+#ifdef __PS3__
+cvar_t  *r_smp;
+#endif
 cvar_t  *r_logFile;
 
 cvar_t  *r_stencilbits;
@@ -1279,6 +1282,11 @@ void R_Register( void ) {
 	r_zfar = ri.Cvar_Get( "r_zfar", "0", CVAR_CHEAT );
 //----(SA)	end
 	r_ignoreGLErrors = ri.Cvar_Get( "r_ignoreGLErrors", "1", CVAR_ARCHIVE );
+#ifdef __PS3__
+	// the back end on the PPU's second hardware thread; latched: applies on
+	// the next map load or vid_restart
+	r_smp = ri.Cvar_Get( "r_smp", "1", CVAR_ARCHIVE | CVAR_LATCH );
+#endif
 	r_fastsky = ri.Cvar_Get( "r_fastsky", "0", CVAR_ARCHIVE );
 	r_inGameVideo = ri.Cvar_Get( "r_inGameVideo", "1", CVAR_ARCHIVE );
 	r_drawSun = ri.Cvar_Get( "r_drawSun", "1", CVAR_ARCHIVE );
@@ -1472,6 +1480,19 @@ void R_Init( void ) {
 	backEndData = (backEndData_t *) ptr;
 	backEndData->polys = (srfPoly_t *) ((char *) ptr + sizeof( *backEndData ));
 	backEndData->polyVerts = (polyVert_t *) ((char *) ptr + sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys);
+#ifdef __PS3__
+	// r_smp: a second buffer, filled by the front end while the back end
+	// draws the other one (~1.9 MB of hunk)
+	r_smpBackEndData[0] = backEndData;
+	r_smpBackEndData[1] = NULL;
+	if ( r_smp->integer ) {
+		ptr = ri.Hunk_Alloc( sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys + sizeof(polyVert_t) * max_polyverts, h_low);
+		r_smpBackEndData[1] = (backEndData_t *) ptr;
+		r_smpBackEndData[1]->polys = (srfPoly_t *) ((char *) ptr + sizeof( *backEndData ));
+		r_smpBackEndData[1]->polyVerts = (polyVert_t *) ((char *) ptr + sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys);
+	}
+	tr.smpFrame = 0;
+#endif
 
 	R_InitNextFrame();
 
@@ -1488,6 +1509,10 @@ void R_Init( void ) {
 	R_InitFreeType();
 
 	RB_ZombieFXInit();
+
+#ifdef __PS3__
+	R_InitCommandBuffers();     // after all the GL setup of the game thread
+#endif
 
 	err = qglGetError();
 	if ( err != GL_NO_ERROR ) {
@@ -1527,6 +1552,9 @@ void RE_Shutdown( qboolean destroyWindow ) {
 		R_IssuePendingRenderCommands();
 		R_DeleteTextures();
 	}
+#ifdef __PS3__
+	R_ShutdownCommandBuffers();     // join the render thread (idle after the sync)
+#endif
 
 	R_DoneFreeType();
 

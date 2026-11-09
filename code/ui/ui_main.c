@@ -3785,6 +3785,37 @@ void UI_ParseSavegame( int index ) {
 	trap_FS_FCloseFile( f );
 }
 
+#ifdef __PS3__
+/*
+==============
+UI_PS3_AutoSaveName
+
+A save name without a keyboard: <map>_<n>, the first number not in the list
+(PS3: the pad cannot type in the name field).
+==============
+*/
+static void UI_PS3_AutoSaveName( char *out, int size ) {
+	char map[MAX_QPATH];
+	int n, i;
+
+	Q_strncpyz( map, UI_Cvar_VariableString( "mapname" ), sizeof( map ) );
+	if ( !map[0] ) {
+		Q_strncpyz( map, "save", sizeof( map ) );
+	}
+	for ( n = 1; n < 1000; n++ ) {
+		Com_sprintf( out, size, "%s_%02d", map, n );
+		for ( i = 0; i < uiInfo.savegameCount; i++ ) {
+			if ( !Q_stricmp( out, uiInfo.savegameList[i].savegameName ) ) {
+				break;
+			}
+		}
+		if ( i == uiInfo.savegameCount ) {
+			return;
+		}
+	}
+}
+#endif
+
 /*
 ==============
 UI_LoadSavegames
@@ -4769,6 +4800,13 @@ static void UI_RunMenuScript( char **args ) {
 
 			name[0] = '\0';
 			Q_strncpyz( name, UI_Cvar_VariableString( "ui_savegame" ), MAX_NAME_LENGTH );
+#ifdef __PS3__
+			if ( !strlen( name ) ) {
+				UI_PS3_AutoSaveName( name, MAX_NAME_LENGTH );
+				trap_Cvar_Set( "ui_savegame", name );
+				Com_Printf( "[save] no name typed, saving as %s\n", name );
+			}
+#endif
 
 			if ( !strlen( name ) ) {
 				Menus_OpenByName( "save_name_popmenu" );
@@ -6982,6 +7020,9 @@ void _UI_MouseEvent( int dx, int dy ) {
 		//menuDef_t *menu = Menu_GetFocused();
 		//Menu_HandleMouseMove(menu, uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory);
 		Display_MouseMove( NULL, uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory );
+#ifdef __PS3__
+		Menus_PadPointerMoved();    // the item under the pointer takes the pad focus
+#endif
 	}
 
 }
@@ -7560,6 +7601,11 @@ cvarTable_t cvarTable[] = {
 
 	{ &ui_brassTime, "cg_brassTime", "1250", CVAR_ARCHIVE },
 	{ &ui_drawCrosshair, "cg_drawCrosshair", "4", CVAR_ARCHIVE },
+#ifdef __PS3__
+	// the Shadows row in Game Options -> Performance: with cgame's default,
+	// so the main menu shows it right before the first map
+	{ NULL, "cg_shadows", "1", CVAR_ARCHIVE },
+#endif
 	{ &ui_drawCrosshairNames, "cg_drawCrosshairNames", "1", CVAR_ARCHIVE },
 	{ &ui_drawCrosshairPickups, "cg_drawCrosshairPickups", "1", CVAR_ARCHIVE },   //----(SA) added
 	{ &ui_marks, "cg_marktime", "20000", CVAR_ARCHIVE },

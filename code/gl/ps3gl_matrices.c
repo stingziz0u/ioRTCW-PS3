@@ -63,11 +63,13 @@ void ps3gl_matrices_init(void)
 
 void ps3gl_MatrixMode(GLenum mode)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl.matrix_mode = mode;
 }
 
 void ps3gl_LoadIdentity(void)
 {
+    PS3GL_FRONT_CHECK();
     float *m = current_matrix();
     memcpy(m, ps3gl_identity, 64);
     current_stack()->dirty = 1;
@@ -75,6 +77,7 @@ void ps3gl_LoadIdentity(void)
 
 void ps3gl_LoadMatrixf(const GLfloat *mat)
 {
+    PS3GL_FRONT_CHECK();
     float *m = current_matrix();
     memcpy(m, mat, 64);
     current_stack()->dirty = 1;

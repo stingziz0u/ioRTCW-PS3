@@ -42,6 +42,28 @@ size_t      ps3_rsx_io_size = 0;
 
 static int ps3_rsx_up = 0;
 static int ps3_fit_border = 0;
+static cvar_t *ps3_fit_cvar;
+static int ps3_fit_pct = -1;
+
+/* vid_ps3_screenfit (70..100 %) into ps3gl, when it changed. Called from
+ * GLimp_Init and each frame begin (render thread, owner of ps3gl). */
+static void PS3_ApplyScreenFit(void)
+{
+    int pct, w, h;
+
+    if (!ps3_fit_cvar || ps3_fit_cvar->integer == ps3_fit_pct)
+        return;
+    pct = ps3_fit_cvar->integer;
+    if (pct < 70) pct = 70;
+    if (pct > 100) pct = 100;
+    ps3_fit_pct = ps3_fit_cvar->integer;
+    w = ((int)ps3_display_width * pct / 100) & ~1;
+    h = ((int)ps3_display_height * pct / 100) & ~1;
+    ps3gl_set_fit(((int)ps3_display_width - w) / 2, ((int)ps3_display_height - h) / 2, w, h);
+    ps3_fit_border = (pct < 100);
+    PS3_Logf("[video] output %ux%u, screen fit %d%% -> %dx%d",
+             ps3_display_width, ps3_display_height, pct, w, h);
+}
 
 static volatile u32 ps3_flip_queued    = 0;
 static volatile u32 ps3_flip_completed = 0;
@@ -306,10 +328,20 @@ void PS3_RSX_BeginFrame(void)
     if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
 
     /* Block until a buffer is free to render into. */
-    PS3_RSX_WaitFlips();
+    {
+        unsigned long long t0 = PS3_ProfTick();
+        PS3_RSX_WaitFlips();
+        PS3_ProfAdd(PS3_PROF_FLIPWAIT, PS3_ProfTick() - t0);
+    }
 
     PS3_RSX_SetRenderTarget(ps3_current_fb);
-    ps3gl_begin_frame();
+    PS3_ApplyScreenFit();
+    {
+        /* waits for the GPU to be done with this vertex ring segment */
+        unsigned long long t0 = PS3_ProfTick();
+        ps3gl_begin_frame();
+        PS3_ProfAdd(PS3_PROF_FENCEWAIT, PS3_ProfTick() - t0);
+    }
     /* triple buffering: every buffer needs its screen-fit border cleared */
     if (ps3_fit_border)
         ps3gl_clear_full_surface();
@@ -342,25 +374,14 @@ void GLimp_Init(qboolean fixedFunction)
 
     QGL_Init();
 
-    /* Screen fit (TV overscan): the engine renders to a centered rect of
-     * vid_ps3_screenfit percent of the output; the border stays black. */
-    {
-        cvar_t *fit = ri.Cvar_Get("vid_ps3_screenfit", PS3_DEFAULT_SCREENFIT, CVAR_ARCHIVE | CVAR_LATCH);
-        int pct = fit->integer;
-        int w, h;
-
-        if (pct < 70) pct = 70;
-        if (pct > 100) pct = 100;
-        w = ((int)ps3_display_width * pct / 100) & ~1;
-        h = ((int)ps3_display_height * pct / 100) & ~1;
-        ps3gl_set_fit(((int)ps3_display_width - w) / 2, ((int)ps3_display_height - h) / 2, w, h);
-        ps3_fit_border = (pct < 100);
-
-        glConfig.vidWidth  = w;
-        glConfig.vidHeight = h;
-        PS3_Logf("GLimp_Init: output %ux%u, screen fit %d%% -> %dx%d",
-                 ps3_display_width, ps3_display_height, pct, w, h);
-    }
+    /* Screen fit (TV overscan): the engine sees the whole 1280x720 and
+     * ps3gl scales it into a centered rect of vid_ps3_screenfit percent
+     * (PS3_ApplyScreenFit, every frame: the menu slider applies live). */
+    ps3_fit_cvar = ri.Cvar_Get("vid_ps3_screenfit", PS3_DEFAULT_SCREENFIT, CVAR_ARCHIVE);
+    ps3_fit_pct = -1;
+    PS3_ApplyScreenFit();
+    glConfig.vidWidth  = ps3_display_width;
+    glConfig.vidHeight = ps3_display_height;
     glConfig.windowAspect       = (float)glConfig.vidWidth / (float)glConfig.vidHeight;
     glConfig.colorBits          = 32;
     glConfig.depthBits          = 24;
@@ -424,3 +445,178 @@ void GLimp_LogComment(char *comment)
 
 int PS3_RSX_Width(void)  { return (int)ps3_display_width; }
 int PS3_RSX_Height(void) { return (int)ps3_display_height; }
+
+/* ---- SMP: the renderer back end on the PPU's second hardware thread -------
+ *
+ * The front end (game thread: server, cgame, culling, sorting) builds frame
+ * N+1 while this thread runs the back end of frame N (shading, skinning,
+ * ps3gl, flips). Same scheme as the r_smp of the original RTCW: two
+ * backEndData buffers, the front end waits for the back end before handing
+ * it the next one (GLimp_FrontEndSleep) and before any GL call of its own
+ * (R_IssuePendingRenderCommands). ps3gl is only ever used by one thread at a
+ * time; PS3GL_FRONT_CHECK in ps3gl logs and waits if that is ever broken. */
+
+#include <sys/thread.h>
+#include <sys/sem.h>
+#include <lv2/thread.h>
+
+#define PS3_RENDER_STACK    (512 * 1024)
+#define PS3_RENDER_PRIO     1000        /* same as the game thread */
+
+static sys_ppu_thread_t ps3_render_tid;
+static sys_sem_t ps3_render_work, ps3_render_done;
+static void (*ps3_render_func)(void);
+static void *volatile ps3_render_data;
+static int ps3_render_up;
+static int ps3_render_pending;          /* front end only: a batch not waited for */
+
+volatile int ps3_render_busy;           /* the back end is running a batch */
+uintptr_t ps3_render_stack_lo, ps3_render_stack_hi;
+
+static void ps3_render_thread(void *arg)
+{
+    sys_ppu_thread_stack_t st;
+    char marker;
+
+    (void)arg;
+    /* the render thread's stack, for PS3GL_FRONT_CHECK; must contain this
+     * frame or every back end call would look like the game thread's */
+    if (sysThreadGetStackInformation(&st) == 0 && st.addr && st.size
+        && (uintptr_t)&marker >= (uintptr_t)st.addr
+        && (uintptr_t)&marker < (uintptr_t)st.addr + st.size) {
+        ps3_render_stack_lo = (uintptr_t)st.addr;
+        ps3_render_stack_hi = (uintptr_t)st.addr + st.size;
+    } else {
+        ps3_render_stack_hi = (uintptr_t)&marker + 4096;
+        ps3_render_stack_lo = ps3_render_stack_hi - PS3_RENDER_STACK + 8192;
+    }
+    PS3_Logf("[smp] render thread stack 0x%lx-0x%lx",
+             (unsigned long)ps3_render_stack_lo, (unsigned long)ps3_render_stack_hi);
+    ps3_render_func();
+    sysThreadExit(0);
+}
+
+qboolean GLimp_SpawnRenderThread(void (*function)(void))
+{
+    sys_sem_attr_t attr;
+    s32 ret;
+
+    if (ps3_render_up)
+        return qtrue;
+
+    memset(&attr, 0, sizeof(attr));
+    attr.attr_protocol = SYS_SEM_ATTR_PROTOCOL;
+    attr.attr_pshared  = SYS_SEM_ATTR_PSHARED;
+    memcpy(attr.name, "rwork", 6);
+    if (sysSemCreate(&ps3_render_work, &attr, 0, 1) != 0)
+        return qfalse;
+    memcpy(attr.name, "rdone", 6);
+    if (sysSemCreate(&ps3_render_done, &attr, 0, 1) != 0) {
+        sysSemDestroy(ps3_render_work);
+        return qfalse;
+    }
+
+    ps3_render_func = function;
+    ps3_render_data = NULL;
+    ps3_render_pending = 0;
+    ps3_render_busy = 0;
+    ret = sysThreadCreate(&ps3_render_tid, ps3_render_thread, NULL, PS3_RENDER_PRIO,
+                          PS3_RENDER_STACK, THREAD_JOINABLE, "render");
+    if (ret != 0) {
+        PS3_Logf("[smp] sysThreadCreate failed (0x%08x): back end stays on the game thread",
+                 (unsigned)ret);
+        sysSemDestroy(ps3_render_done);
+        sysSemDestroy(ps3_render_work);
+        return qfalse;
+    }
+    ps3_render_up = 1;
+    ps3_prof_smp = 1;
+    PS3_Logf("[smp] render thread up: the back end runs on the 2nd PPU thread");
+    return qtrue;
+}
+
+/* render thread: report the last batch done, sleep until the next one */
+void *GLimp_RendererSleep(void)
+{
+    static int had_batch;
+    void *data;
+
+    if (had_batch) {
+        __asm__ volatile("sync" ::: "memory");
+        ps3_render_busy = 0;
+        sysSemPost(ps3_render_done, 1);
+    }
+    sysSemWait(ps3_render_work, 0);
+    __asm__ volatile("sync" ::: "memory");
+    data = ps3_render_data;
+    had_batch = (data != NULL);
+    return data;
+}
+
+/* front end: wait until the back end is idle (no-op if it already is) */
+void GLimp_FrontEndSleep(void)
+{
+    unsigned long long t0;
+
+    if (!ps3_render_pending)
+        return;
+    t0 = PS3_ProfTick();
+    sysSemWait(ps3_render_done, 0);
+    __asm__ volatile("sync" ::: "memory");
+    ps3_render_pending = 0;
+    PS3_ProfAdd(PS3_PROF_RWAIT, PS3_ProfTick() - t0);
+}
+
+/* front end: hand the back end a command list (NULL: the thread exits) */
+void GLimp_WakeRenderer(void *data)
+{
+    GLimp_FrontEndSleep();
+    ps3_render_data = data;
+    ps3_render_pending = (data != NULL);
+    ps3_render_busy = (data != NULL);
+    __asm__ volatile("sync" ::: "memory");
+    sysSemPost(ps3_render_work, 1);
+}
+
+void GLimp_ShutdownRenderThread(void)
+{
+    u64 retval;
+
+    if (!ps3_render_up)
+        return;
+    GLimp_WakeRenderer(NULL);
+    sysThreadJoin(ps3_render_tid, &retval);
+    sysSemDestroy(ps3_render_done);
+    sysSemDestroy(ps3_render_work);
+    ps3_render_up = 0;
+    ps3_prof_smp = 0;
+    ps3_render_busy = 0;
+    ps3_render_stack_lo = ps3_render_stack_hi = 0;
+}
+
+/* ps3gl called from the game thread while the back end runs: a missing sync
+ * in the renderer. Say where once, and wait so both do not write RSX commands
+ * at the same time. */
+void ps3gl_front_call(const char *func)
+{
+    static const char *logged[16];
+    sys_ppu_thread_t self;
+    int i;
+
+    /* never wait on ourselves: if the stack range is wrong, stop checking */
+    if (sysThreadGetId(&self) == 0 && self == ps3_render_tid) {
+        PS3_Logf("[smp] %s: render thread outside its stack range, check off", func);
+        ps3_render_stack_lo = 0;
+        ps3_render_stack_hi = ~(uintptr_t)0;
+        return;
+    }
+
+    for (i = 0; i < 16 && logged[i]; i++)
+        if (logged[i] == func)
+            break;
+    if (i < 16 && !logged[i]) {
+        logged[i] = func;
+        PS3_Logf("[smp] %s from the game thread while the back end runs: waiting", func);
+    }
+    GLimp_FrontEndSleep();
+}

@@ -255,7 +255,11 @@ static void RB_SurfaceTriangles( srfTriangles_t *srf ) {
 	int dlightBits;
 	qboolean needsNormal;
 
+#ifdef __PS3__
+	dlightBits = srf->dlightBits[SMP_BACK];
+#else
 	dlightBits = srf->dlightBits;
+#endif
 	tess.dlightBits |= dlightBits;
 
 	RB_CHECKOVERFLOW( srf->numVerts, srf->numIndexes );
@@ -1051,7 +1055,11 @@ void RB_SurfaceFace( srfSurfaceFace_t *surf ) {
 
 	RB_CHECKOVERFLOW( surf->numPoints, surf->numIndices );
 
+#ifdef __PS3__
+	dlightBits = surf->dlightBits[SMP_BACK];
+#else
 	dlightBits = surf->dlightBits;
+#endif
 	tess.dlightBits |= dlightBits;
 
 	indices = ( unsigned * )( ( ( char  * ) surf ) + surf->ofsIndices );
@@ -1143,7 +1151,11 @@ static void RB_SurfaceGrid( srfGridMesh_t *cv ) {
 	int     *vDlightBits;
 	qboolean needsNormal;
 
+#ifdef __PS3__
+	dlightBits = cv->dlightBits[SMP_BACK];
+#else
 	dlightBits = cv->dlightBits;
+#endif
 	tess.dlightBits |= dlightBits;
 
 	// determine the allowable discrepance

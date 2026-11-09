@@ -2646,6 +2646,14 @@ shader_t *R_FindShader( const char *name, int lightmapIndex, qboolean mipRawImag
 		}
 	}
 
+#ifdef __PS3__
+	// a new shader: images get uploaded and tr.sortedShaders reordered, both
+	// used by the back end (r_smp: make sure the render thread is idle)
+	if ( glConfig.smpActive ) {
+		R_IssuePendingRenderCommands();
+	}
+#endif
+
 	InitShader( strippedName, lightmapIndex );
 
 	// FIXME: set these "need" values apropriately
@@ -2783,6 +2791,12 @@ qhandle_t RE_RegisterShaderFromImage( const char *name, int lightmapIndex, image
 			return sh->index;
 		}
 	}
+
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		R_IssuePendingRenderCommands(); // see R_FindShader
+	}
+#endif
 
 	InitShader( name, lightmapIndex );
 

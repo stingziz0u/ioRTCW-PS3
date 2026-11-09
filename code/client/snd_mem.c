@@ -57,6 +57,10 @@ void	SND_free(sndBuffer *v) {
 	inUse += sizeof(sndBuffer);
 }
 
+#ifdef __PS3__
+void S_AdpcmCacheForget( sndBuffer *chunk );    // snd_mix.c
+#endif
+
 sndBuffer*	SND_malloc(void) {
 	sndBuffer *v;
 redo:
@@ -71,6 +75,9 @@ redo:
 	v = freelist;
 	freelist = *(sndBuffer **)freelist;
 	v->next = NULL;
+#ifdef __PS3__
+	S_AdpcmCacheForget( v );    // reused: its decoded samples are stale
+#endif
 	return v;
 }
 
@@ -112,6 +119,9 @@ void SND_setup(void) {
 	
 	*(sndBuffer **)q = NULL;
 	freelist = p + scs - 1;
+#ifdef __PS3__
+	S_AdpcmCacheForget( NULL );
+#endif
 
 	Com_Printf("Sound memory manager started\n");
 }
@@ -121,6 +131,28 @@ void SND_shutdown(void)
 		free(sfxScratchBuffer);
 		free(buffer);
 }
+
+#ifdef __PS3__
+/*
+Decimating (the mixer runs at 22050 Hz: a 44.1 kHz sound is halved): average
+the source frames each output sample covers instead of keeping one of them,
+which aliased the highs into a metallic hiss. span = 1 when not decimating.
+*/
+static int PS3_DecimSample16( const short *data, int srcsample, int channels, int j, int span, int total ) {
+	int k, sum = 0, n = 0;
+
+	for ( k = 0; k < span; k++ ) {
+		int idx = srcsample + k * channels + j;
+		if ( idx >= total ) {
+			break;
+		}
+		sum += data[idx];
+		n++;
+	}
+	return n ? sum / n : data[srcsample + j];
+}
+#define PS3_DECIM_SPAN( stepscale ) ( ( stepscale ) >= 1.5f ? (int)( ( stepscale ) + 0.5f ) : 1 )
+#endif
 
 /*
 ================
@@ -155,7 +187,11 @@ static int ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, int s
 		for (j=0 ; j<channels ; j++)
 		{
 			if( inwidth == 2 ) {
+#ifdef __PS3__
+				sample = PS3_DecimSample16( (short *)data, srcsample, channels, j, PS3_DECIM_SPAN( stepscale ), samples * channels );
+#else
 				sample = ( ((short *)data)[srcsample+j] );
+#endif
 			} else {
 				sample = (unsigned int)( (unsigned char)(data[srcsample+j]) - 128) << 8;
 			}
@@ -208,7 +244,14 @@ static int ResampleSfxRaw( short *sfx, int channels, int inrate, int inwidth, in
 		for (j=0 ; j<channels ; j++)
 		{
 			if( inwidth == 2 ) {
+#ifdef __PS3__
+				// the wav codec already swapped the samples to host order
+				// (S_ByteSwapRawSamples); swapping again on big-endian turned
+				// every ADPCM sound into noise. ResampleSfx does not swap either.
+				sample = PS3_DecimSample16( (short *)data, srcsample, channels, j, PS3_DECIM_SPAN( stepscale ), samples * channels );
+#else
 				sample = LittleShort ( ((short *)data)[srcsample+j] );
+#endif
 			} else {
 				sample = (int)( (unsigned char)(data[srcsample+j]) - 128) << 8;
 			}
@@ -249,6 +292,13 @@ qboolean S_LoadSound( sfx_t *sfx )
 		Com_DPrintf(S_COLOR_YELLOW "WARNING: %s is a 8 bit audio file\n", sfx->soundName);
 	}
 
+#if defined( __PS3__ ) && defined( PS3_DIAG )
+	// the mixer runs at 22050 Hz: say which sounds are not 22k mono
+	if ( info.rate != dma.speed || info.channels != 1 ) {
+		Com_Printf( "[snd] %s: %d Hz, %d ch, %d bit, %.1f s\n", sfx->soundName, info.rate,
+					info.channels, info.width * 8, info.rate ? (float)info.samples / info.rate : 0.0f );
+	}
+#endif
 	if ( info.rate != 22050 ) {
 		Com_DPrintf(S_COLOR_YELLOW "WARNING: %s is not a 22kHz audio file\n", sfx->soundName);
 	}
@@ -263,6 +313,15 @@ qboolean S_LoadSound( sfx_t *sfx )
 	// manager to do the right thing for us and page
 	// sound in as needed
 
+#ifdef __PS3__
+	// Long mono sounds (voices, ambient loops) go in as 4-bit ADPCM: four
+	// times as many fit in the 18 MB cache (PS3_MAX_COMSOUNDMEGS). Without it
+	// village2's ambient loops did not fit together and were re-read from the
+	// HDD every frame (2 fps). Short effects stay 16-bit.
+	if ( info.channels == 1 && info.width > 1 && info.samples >= 2 * info.rate ) {
+		sfx->soundCompressed = qtrue;
+	}
+#endif
 	if( info.channels == 1 && sfx->soundCompressed == qtrue) {
 		sfx->soundCompressionMethod = 1;
 		sfx->soundData = NULL;

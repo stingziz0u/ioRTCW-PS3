@@ -54,6 +54,13 @@ R_InitNextFrame
 ====================
 */
 void R_InitNextFrame( void ) {
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		// the back end has just been handed this buffer: fill the other one
+		tr.smpFrame ^= 1;
+		backEndData = r_smpBackEndData[tr.smpFrame];
+	}
+#endif
 	backEndData->commands.used = 0;
 
 	r_firstSceneDrawSurf = 0;

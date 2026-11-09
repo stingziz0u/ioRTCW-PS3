@@ -625,6 +625,46 @@ void S_PaintChannelFromWavelet( channel_t *ch, sfx_t *sc, int count, int sampleO
 	}
 }
 
+#ifdef __PS3__
+/*
+Decoded ADPCM chunks, a few at a time. Upstream keeps one decoded chunk
+(sfxScratchBuffer) for everything, so with several ADPCM sounds playing
+(voices, ambient loops) every paint call decoded 4096 samples again. The
+entries are keyed by chunk; SND_malloc forgets a chunk when it is reused.
+*/
+#define ADPCM_CACHE_CHUNKS 8
+static struct {
+	sndBuffer	*chunk;
+	short		samples[SND_CHUNK_SIZE * 4];
+} adpcmCache[ADPCM_CACHE_CHUNKS];
+static int adpcmCacheNext;
+
+void S_AdpcmCacheForget( sndBuffer *chunk ) {
+	int i;
+
+	for ( i = 0; i < ADPCM_CACHE_CHUNKS; i++ ) {
+		if ( !chunk || adpcmCache[i].chunk == chunk ) {
+			adpcmCache[i].chunk = NULL;
+		}
+	}
+}
+
+static short *S_AdpcmCachedSamples( sndBuffer *chunk ) {
+	int i;
+
+	for ( i = 0; i < ADPCM_CACHE_CHUNKS; i++ ) {
+		if ( adpcmCache[i].chunk == chunk ) {
+			return adpcmCache[i].samples;
+		}
+	}
+	i = adpcmCacheNext;
+	adpcmCacheNext = ( adpcmCacheNext + 1 ) % ADPCM_CACHE_CHUNKS;
+	S_AdpcmGetSamples( chunk, adpcmCache[i].samples );
+	adpcmCache[i].chunk = chunk;
+	return adpcmCache[i].samples;
+}
+#endif
+
 void S_PaintChannelFromADPCM( channel_t *ch, sfx_t *sc, int count, int sampleOffset, int bufferOffset ) {
 	int						data;
 	int						leftvol, rightvol;
@@ -650,6 +690,9 @@ void S_PaintChannelFromADPCM( channel_t *ch, sfx_t *sc, int count, int sampleOff
 		i++;
 	}
 
+#ifdef __PS3__
+	samples = S_AdpcmCachedSamples( chunk );
+#else
 	if (i!=sfxScratchIndex || sfxScratchPointer != sc) {
 		S_AdpcmGetSamples( chunk, sfxScratchBuffer );
 		sfxScratchIndex = i;
@@ -657,6 +700,7 @@ void S_PaintChannelFromADPCM( channel_t *ch, sfx_t *sc, int count, int sampleOff
 	}
 
 	samples = sfxScratchBuffer;
+#endif
 
 	for ( i=0 ; i<count ; i++ ) {
 		data  = samples[sampleOffset++];
@@ -665,7 +709,14 @@ void S_PaintChannelFromADPCM( channel_t *ch, sfx_t *sc, int count, int sampleOff
 
 		if (sampleOffset == SND_CHUNK_SIZE*4) {
 			chunk = chunk->next;
+#ifdef __PS3__
+			if ( !chunk ) {
+				break;      // end of the sound
+			}
+			samples = S_AdpcmCachedSamples( chunk );
+#else
 			S_AdpcmGetSamples( chunk, sfxScratchBuffer);
+#endif
 			sampleOffset = 0;
 			sfxScratchIndex++;
 		}

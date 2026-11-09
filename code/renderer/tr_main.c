@@ -162,6 +162,16 @@ void R_FogOn( void ) {
 //			return;
 //	}
 
+#ifdef __PS3__
+	// a back end function: the fog of the view being drawn (r_smp, RB_DrawSurfs)
+	if ( backEnd.refdef.rdflags & RDF_SKYBOXPORTAL ) { // don't force world fog on portal sky
+		if ( !( backEnd.fog[FOG_PORTALVIEW].registered ) ) {
+			return;
+		}
+	} else if ( !backEnd.fogNum )     {
+		return;
+	}
+#else
 	if ( backEnd.refdef.rdflags & RDF_SKYBOXPORTAL ) { // don't force world fog on portal sky
 		if ( !( glfogsettings[FOG_PORTALVIEW].registered ) ) {
 			return;
@@ -169,6 +179,7 @@ void R_FogOn( void ) {
 	} else if ( !glfogNum )     {
 		return;
 	}
+#endif
 
 	qglEnable( GL_FOG );
 	fogIsOn = qtrue;
@@ -340,6 +351,20 @@ int R_CullLocalBox( vec3_t bounds[2] ) {
 		anyBack |= back;
 	}
 
+#ifdef __PS3__
+	if ( tr.viewParms.fogCull ) {   // all of it past the end of the fog
+		frust = &tr.viewParms.fogPlane;
+		for ( j = 0 ; j < 8 ; j++ ) {
+			if ( DotProduct( transformed[j], frust->normal ) > frust->dist ) {
+				break;
+			}
+		}
+		if ( j == 8 ) {
+			return CULL_OUT;
+		}
+	}
+#endif
+
 	if ( !anyBack ) {
 		return CULL_IN;     // completely inside frustum
 	}
@@ -383,6 +408,13 @@ int R_CullPointAndRadius( vec3_t pt, float radius ) {
 			mightBeClipped = qtrue;
 		}
 	}
+
+#ifdef __PS3__
+	if ( tr.viewParms.fogCull
+		 && DotProduct( pt, tr.viewParms.fogPlane.normal ) - tr.viewParms.fogPlane.dist < -radius ) {
+		return CULL_OUT;            // all of it past the end of the fog
+	}
+#endif
 
 	if ( mightBeClipped ) {
 		return CULL_CLIP;
@@ -691,7 +723,11 @@ void R_SetFrameFog( void ) {
 		if ( glfogsettings[FOG_CURRENT].end < tr.viewParms.zFar ) {
 			tr.viewParms.zFar = glfogsettings[FOG_CURRENT].end;
 		}
+#ifdef __PS3__
+		if ( tr.refdef.rdflags & RDF_SNOOPERVIEW ) {    // front end: its own refdef (r_smp)
+#else
 		if ( backEnd.refdef.rdflags & RDF_SNOOPERVIEW ) {
+#endif
 			tr.viewParms.zFar += 1000;  // zfar out slightly further for snooper.  this works fine with our maps, but could be 'funky' with later maps
 
 		}
@@ -792,6 +828,43 @@ Set up the culling frustum planes for the current view using the results we got 
 the projection matrix.
 =================
 */
+#ifdef __PS3__
+/*
+=================
+R_SetupFogCull
+
+With the map's linear fog (clearscreen), a surface farther along the view
+axis than the fog end comes out fully fogged: the clear color. Culling it
+does not change the picture and saves the front and back end the work (the
+far clip plane alone only stops the GPU). The fog distance in the vertex
+program is the clip w, the same distance along the view axis as this plane.
+Not while a fog transition runs (FOG_CURRENT lags a frame), in portal,
+snooper or no-world views, or with r_zfar.
+=================
+*/
+static void R_SetupFogCull( viewParms_t *dest ) {
+	glfog_t *fog = &glfogsettings[FOG_CURRENT];
+
+	dest->fogCull = qfalse;
+	if ( !r_wolffog->integer || r_zfar->value || glfogNum <= FOG_NONE || !fog->registered
+		 || fog->mode != GL_LINEAR || !fog->clearscreen || fog->end <= 0 ) {
+		return;
+	}
+	if ( glfogsettings[FOG_TARGET].finishTime && glfogsettings[FOG_TARGET].finishTime >= tr.refdef.time ) {
+		return;
+	}
+	if ( dest->isPortal || ( tr.refdef.rdflags & ( RDF_NOWORLDMODEL | RDF_SKYBOXPORTAL | RDF_SNOOPERVIEW ) ) ) {
+		return;
+	}
+	// dot( p - origin, forward ) < end + margin  is in front of the plane
+	VectorNegate( dest->or.axis[0], dest->fogPlane.normal );
+	dest->fogPlane.dist = -( DotProduct( dest->or.origin, dest->or.axis[0] ) + fog->end + 16 );
+	dest->fogPlane.type = PLANE_NON_AXIAL;
+	SetPlaneSignbits( &dest->fogPlane );
+	dest->fogCull = qtrue;
+}
+#endif
+
 void R_SetupFrustum (viewParms_t *dest, float xmin, float xmax, float ymax, float zProj, float stereoSep)
 {
 	vec3_t ofsorigin;
@@ -845,6 +918,9 @@ void R_SetupFrustum (viewParms_t *dest, float xmin, float xmax, float ymax, floa
 		dest->frustum[i].dist = DotProduct (ofsorigin, dest->frustum[i].normal);
 		SetPlaneSignbits( &dest->frustum[i] );
 	}
+#ifdef __PS3__
+	R_SetupFogCull( dest );
+#endif
 }
 
 /*
@@ -1198,6 +1274,12 @@ static qboolean SurfIsOffscreen( const drawSurf_t *drawSurf, vec4_t clipDest[128
 	int i;
 	unsigned int pointOr = 0;
 	unsigned int pointAnd = (unsigned int)~0;
+
+#ifdef __PS3__
+	if ( glConfig.smpActive ) { // uses tess, the render thread's (as in the original r_smp)
+		return qfalse;
+	}
+#endif
 
 	R_RotateForViewer();
 
@@ -1764,9 +1846,22 @@ void R_RenderView( viewParms_t *parms ) {
 
 	R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, numDrawSurfs - firstDrawSurf );
 
+#ifdef __PS3__
+	// draw main system development information (surface outlines, etc)
+	// The fog toggles are back end GL calls, and with r_smp the render thread
+	// may be drawing now: only for r_debugSurface, after a sync.
+	if ( r_debugSurface->integer ) {
+		R_IssuePendingRenderCommands();
+		R_FogOff();
+		R_DebugGraphics();
+		R_FogOn();
+	}
+
+#else
 	// draw main system development information (surface outlines, etc)
 	R_FogOff();
 	R_DebugGraphics();
 	R_FogOn();
 
+#endif
 }

@@ -3,7 +3,16 @@
 #
 #   make              full game (stage 2)            -> iortcw-ps3-$(VERSION).pkg
 #   make STAGE=1      headless engine test           -> iortcw-ps3-stage1.pkg
+#   make MAPWALK=1    game that loads every map, logs memory/fps and quits
+#                                                    -> iortcw-ps3-mapwalk.pkg
+#   make MAPWALK=1 WALKMAPS="dark xlabs"   only those maps, 20 s each
+#   make MAPWALK=1 WALKSECS=90   long test: 90 s per map with god mode,
+#                                cutscene maps until their script moves on
 #   make DEBUG=1      debug build (any stage)        -> iortcw-ps3-...-debug.pkg
+#   make DIAG=1       game with the test diagnostics (fps on screen, [fps]/[prof]
+#                     every 30 s, [hitch], [pad], [lock], [fog], [snd], [cam]
+#                     in the log)                     -> iortcw-ps3-...-diag.pkg
+#                     (MAPWALK and DEBUG builds always have them)
 #   make clean        remove obj/ and build/ (not the .pkg files)
 #
 # Each variant has its own obj/ and build/ folder: switching STAGE or DEBUG
@@ -17,20 +26,32 @@ ifeq ($(strip $(PSL1GHT)),)
   export PSL1GHT := $(PS3DEV)
 endif
 
-VERSION := 0.1
+VERSION := 1.1
 STAGE   ?= 2
 DEBUG   ?= 0
+DIAG    ?= 0
+MAPWALK ?= 0
+WALKMAPS ?=
+WALKSECS ?= 0
 
 APPID   := IORTCWPS3
 ifeq ($(STAGE),1)
   TITLE   := Return to Castle Wolfenstein (stage 1)
   VARIANT := stage1
+else ifeq ($(MAPWALK),1)
+  TITLE   := Return to Castle Wolfenstein (map test)
+  VARIANT := mapwalk
 else
   TITLE   := Return to Castle Wolfenstein
   VARIANT := $(VERSION)
 endif
 ifeq ($(DEBUG),1)
   VARIANT := $(VARIANT)-debug
+  DIAG    := 1
+else ifeq ($(MAPWALK),1)
+  DIAG    := 1
+else ifeq ($(DIAG),1)
+  VARIANT := $(VARIANT)-diag
 endif
 
 TARGET   := iortcw-ps3
@@ -39,9 +60,9 @@ OBJDIR   := $(CURDIR)/obj/$(VARIANT)
 BUILDDIR := $(CURDIR)/build/$(VARIANT)
 PKGFILES := $(BUILDDIR)/pkgfiles
 
-# Build stamp: the commit the EBOOT was built from ("-dirty" = uncommitted
-# changes). Goes to the first log line and to USRDIR/VERSION.TXT.
-GIT_REV := $(shell git describe --always --dirty 2>/dev/null || echo unknown)
+# Build stamp: the patch level of the tree (PATCHLEVEL, bumped by every
+# patch). Goes to the first log line and to USRDIR/VERSION.TXT.
+PATCHLEVEL := $(shell cat $(CURDIR)/PATCHLEVEL 2>/dev/null || echo 0)
 
 include $(PSL1GHT)/ppu_rules
 
@@ -77,7 +98,8 @@ ZLIB_SRCS := $(addprefix $(C)/zlib-1.2.11/, \
   adler32.c crc32.c inffast.c inflate.c inftrees.c zutil.c ioapi.c unzip.c)
 
 PS3_SRCS := \
-  $(C)/sys/ps3_main.c $(C)/sys/ps3_sys.c $(C)/sys/ps3_log.c $(C)/sys/ps3_net_null.c
+  $(C)/sys/ps3_main.c $(C)/sys/ps3_sys.c $(C)/sys/ps3_log.c $(C)/sys/ps3_net_null.c \
+  $(C)/sys/ps3_prof.c
 
 PS3_ASM_SRCS := $(C)/sys/ps3_setjmp.S
 
@@ -90,7 +112,7 @@ CLIENT_SRCS := $(addprefix $(C)/client/, \
   $(C)/qcommon/md5.c $(C)/qcommon/puff.c
 
 RENDERER_SRCS := $(addprefix $(C)/renderer/, \
-  tr_animation.c tr_backend.c tr_bsp.c tr_cmds.c tr_cmesh.c tr_curve.c tr_flares.c \
+  tr_animation.c tr_animation_front.c tr_backend.c tr_bsp.c tr_cmds.c tr_cmesh.c tr_curve.c tr_flares.c \
   tr_font.c tr_image.c tr_image_bmp.c tr_image_jpg.c tr_image_pcx.c tr_image_png.c \
   tr_image_tga.c tr_init.c tr_light.c tr_main.c tr_marks.c tr_mesh.c tr_model.c \
   tr_model_iqm.c tr_noise.c tr_scene.c tr_shade.c tr_shade_calc.c tr_shader.c \
@@ -109,7 +131,7 @@ JPEG_SRCS := $(addprefix $(C)/jpeg-8c/, \
   jidctint.c jmemmgr.c jmemnobs.c jquant1.c jquant2.c jutils.c)
 
 PS3_CLIENT_SRCS := \
-  $(C)/sys/ps3_glimp.c $(C)/input/ps3_input.c $(C)/audio/ps3_snd.c \
+  $(C)/sys/ps3_glimp.c $(C)/input/ps3_input.c $(C)/input/ps3_osk.c $(C)/audio/ps3_snd.c \
   $(C)/renderer/ps3/qgl_ps3.c \
   $(addprefix $(C)/gl/, ps3gl_main.c ps3gl_states.c ps3gl_matrices.c ps3gl_vertices.c \
     ps3gl_colors.c ps3gl_textures.c ps3gl_draw.c ps3gl_shaders.c)
@@ -170,6 +192,12 @@ ifeq ($(DEBUG),1)
 else
   BASE_CFLAGS += -DNDEBUG
 endif
+ifeq ($(MAPWALK),1)
+  BASE_CFLAGS += -DPS3_MAPWALK
+endif
+ifeq ($(DIAG),1)
+  BASE_CFLAGS += -DPS3_DIAG
+endif
 BASE_CFLAGS += $(EXTRA_CFLAGS)
 
 ENGINE_CFLAGS := $(BASE_CFLAGS) -I$(OBJDIR)
@@ -221,7 +249,7 @@ ELF := $(OBJDIR)/$(TARGET).elf
 #---------------------------------------------------------------------------------
 # Rules
 #---------------------------------------------------------------------------------
-.PHONY: all clean check getlog verify
+.PHONY: all clean check verify
 
 all: $(OUT_PKG)
 
@@ -236,7 +264,7 @@ $(OBJDIR)/$(TARGET).pkg: pkgfiles
 pkgfiles:
 	@rm -rf $(PKGFILES)
 	@mkdir -p $(PKGFILES)/USRDIR/main
-	@printf "%s\n%s\ncommit %s\nbuilt %s\n" "$(TITLE)" "$(TARGET) $(VARIANT)" "$(GIT_REV)" \
+	@printf "%s\n%s\npatch %s\nbuilt %s\n" "$(TITLE)" "$(TARGET) $(VARIANT)" "$(PATCHLEVEL)" \
 	  "$$(date '+%Y-%m-%d %H:%M')" > $(PKGFILES)/USRDIR/VERSION.TXT
 
 $(ELF): $(ASM_OBJS) $(ENGINE_OBJS) $(MODULE_OBJS)
@@ -252,11 +280,13 @@ check:
 	 if [ $$((0x$$got)) -ge $$((0x10000)) ] || [ "$$stubs" != "0" ]; then \
 	   echo "ERROR: TOC over 64 KB -- this EBOOT would hang at boot"; exit 1; fi
 
-# rewritten only when the commit changes, so ps3_main.c recompiles exactly then
+# rewritten only when the patch level changes, so ps3_main.c recompiles exactly then
 .PHONY: FORCE
 $(OBJDIR)/ps3_rev.h: FORCE
 	@mkdir -p $(dir $@)
-	@echo '#define PS3_BUILD_REV "$(GIT_REV)"' > $@.tmp
+	@echo '#define PS3_PATCHLEVEL "$(PATCHLEVEL)"' > $@.tmp
+	@echo '#define PS3_WALKMAPS "$(WALKMAPS)"' >> $@.tmp
+	@echo '#define PS3_WALKSECS $(WALKSECS)' >> $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
@@ -327,26 +357,12 @@ $(OBJDIR)/qagame_module.o: $(QAGAME_OBJS)
 $(OBJDIR)/cgame_module.o: $(CGAME_OBJS)
 $(OBJDIR)/ui_module.o: $(UI_OBJS)
 
-# Which build is where: your tree, the PKG you built, and (with PS3IP) the
-# one installed on the console. make verify [PS3IP=192.168.x.x]
+# Which patch level the tree and the built PKG are at: make verify
 verify:
-	@echo "tree      : $(GIT_REV)"
+	@echo "tree : patch $(PATCHLEVEL)"
 	@if [ -f $(OUT_PKG) ]; then \
-	   echo "pkg       : $(OUT_PKG), built $$(date -r $(OUT_PKG) '+%Y-%m-%d %H:%M')"; \
-	   echo "pkg commit: $$(sed -n 's/^commit //p' $(PKGFILES)/USRDIR/VERSION.TXT 2>/dev/null)"; \
-	 else echo "pkg       : $(OUT_PKG) not built yet"; fi
-	@if [ -n "$(PS3IP)" ]; then \
-	   c=$$(curl -s ftp://$(PS3IP)/dev_hdd0/game/$(APPID)/USRDIR/VERSION.TXT | sed -n 's/^commit //p'); \
-	   echo "console   : $${c:-nothing installed / FTP not reachable}"; \
-	   if [ "$$c" = "$(GIT_REV)" ]; then echo "==> the console runs this tree"; \
-	   else echo "==> DIFFERENT: rebuild and reinstall the PKG"; fi; fi
-
-# Download the log over FTP (webMAN): make getlog PS3IP=192.168.x.x
-getlog:
-	@test -n "$(PS3IP)" || (echo "usage: make getlog PS3IP=192.168.x.x"; exit 1)
-	@curl -s -o iortcw-ps3.log ftp://$(PS3IP)/dev_hdd0/game/$(APPID)/USRDIR/iortcw-ps3.log
-	@curl -s -o iortcw-ps3.old.log ftp://$(PS3IP)/dev_hdd0/game/$(APPID)/USRDIR/iortcw-ps3.old.log || true
-	@echo "==> iortcw-ps3.log ($$(wc -l < iortcw-ps3.log) lines)"
+	   echo "pkg  : patch $$(sed -n 's/^patch //p' $(PKGFILES)/USRDIR/VERSION.TXT 2>/dev/null), $(OUT_PKG) built $$(date -r $(OUT_PKG) '+%Y-%m-%d %H:%M')"; \
+	 else echo "pkg  : $(OUT_PKG) not built yet"; fi
 
 clean:
 	@rm -rf obj build

@@ -27,6 +27,13 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "tr_local.h"
+
+#ifdef __PS3__
+// r_smp: the back end draws with the fog of the view it is drawing (copied
+// by RB_DrawSurfs), not the front end's, which is already on the next frame
+#define glfogsettings   backEnd.fog
+#define glfogNum        backEnd.fogNum
+#endif
 #include "qgl.h"
 
 backEndData_t  *backEndData;
@@ -608,6 +615,12 @@ void RB_ZombieFXInit( void ) {
 void RB_ZombieFXAddNewHit( int entityNum, const vec3_t hitPos, const vec3_t hitDir ) {
 	int part = 0;
 
+#ifdef __PS3__
+	if ( glConfig.smpActive ) {
+		R_IssuePendingRenderCommands();     // cgame's call: the back end reads these
+	}
+#endif
+
 	if ( entityNum == -1 ) {
 		// hack, reset data
 		RB_ZombieFXInit();
@@ -910,7 +923,15 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			oldNumVerts = tess.numVertexes;
 			oldNumIndex = tess.numIndexes;
 
+#ifdef __PS3__
+			{
+				unsigned long long ps3t0 = PS3_ProfTick();
+				rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
+				PS3_ProfAdd( PS3_PROF_SURF, PS3_ProfTick() - ps3t0 );
+			}
+#else
 			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
+#endif
 
 			// RF, convert the newly created vertexes into dust particles, and overwrite
 			if (backEnd.currentEntity->e.reFlags & REFLAG_ZOMBIEFX) {
@@ -1052,7 +1073,15 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 		oldNumIndex = tess.numIndexes;
 
 		// add the triangles for this surface
+#ifdef __PS3__
+		{
+			unsigned long long ps3t0 = PS3_ProfTick();
+			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
+			PS3_ProfAdd( PS3_PROF_SURF, PS3_ProfTick() - ps3t0 );
+		}
+#else
 		rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
+#endif
 
 		// RF, convert the newly created vertexes into dust particles, and overwrite
 		if ( backEnd.currentEntity->e.reFlags & REFLAG_ZOMBIEFX ) {
@@ -1125,6 +1154,9 @@ void    RB_SetGL2D( void ) {
 			  GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
 
 	qglDisable( GL_FOG ); //----(SA)	added
+#ifdef __PS3__
+	fogIsOn = qfalse;   // keep R_FogOn's cache in step with the GL state
+#endif
 
 	GL_Cull( CT_TWO_SIDED );
 	qglDisable( GL_CLIP_PLANE0 );
@@ -1446,6 +1478,10 @@ const void  *RB_DrawSurfs( const void *data ) {
 
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
+#ifdef __PS3__
+	memcpy( backEnd.fog, cmd->fog, sizeof( backEnd.fog ) );
+	backEnd.fogNum = cmd->fogNum;
+#endif
 
 #ifdef USE_BLOOM
 	//TODO Maybe check for rdf_noworld stuff but q3mme has full 3d ui
@@ -1467,6 +1503,15 @@ const void  *RB_DrawBuffer( const void *data ) {
 	const drawBufferCommand_t   *cmd;
 
 	cmd = (const drawBufferCommand_t *)data;
+
+#ifdef __PS3__
+	{
+		// wait for a free framebuffer and open the ps3gl frame. The frame's
+		// first command, so with r_smp it runs on the render thread
+		extern void PS3_RSX_BeginFrame( void );
+		PS3_RSX_BeginFrame();
+	}
+#endif
 
 #ifndef USE_OPENGLES
 	qglDrawBuffer( cmd->buffer );
@@ -1676,6 +1721,12 @@ void RB_ExecuteRenderCommands( const void *data ) {
 
 	t1 = ri.Milliseconds();
 
+#ifdef __PS3__
+	// which backEndData buffer this is: the world surfaces keep their dlight
+	// bits per buffer
+	backEnd.smpFrame = ( r_smpBackEndData[1] && data == r_smpBackEndData[1]->commands.cmds ) ? 1 : 0;
+#endif
+
 	while ( 1 ) {
 		data = PADP(data, sizeof(void *));
 
@@ -1733,3 +1784,21 @@ void RB_ExecuteRenderCommands( const void *data ) {
 
 }
 
+#ifdef __PS3__
+/*
+================
+RB_RenderThread
+
+r_smp: the render thread (ps3_glimp.c) runs the batches the front end hands it
+================
+*/
+void RB_RenderThread( void ) {
+	const void *data;
+
+	while ( ( data = GLimp_RendererSleep() ) != NULL ) {
+		unsigned long long t0 = PS3_ProfTick();
+		RB_ExecuteRenderCommands( data );
+		PS3_ProfAdd( PS3_PROF_BACKEND, PS3_ProfTick() - t0 );
+	}
+}
+#endif

@@ -358,7 +358,17 @@ static int      pad_sent[PB_COUNT];      /* key sent for the press, released wit
 static int      ps3_axis_prev[4];
 static float    ps3_cursor_accum_x, ps3_cursor_accum_y;
 static int      select_combo;
+static int      select_at, select_hold;     /* SELECT held: its own key */
+
+/* SELECT tapped = K_JOY11 (notebook), held longer = K_JOY16 (binoculars)
+ * until released; the menus name it "SELECT (HOLD)" (cl_ui.c) */
+#define SELECT_HOLD_MS     300
+#define K_SELECT_HOLD      K_JOY16
 static int      pad_repeat_at[PB_COUNT]; /* next auto-repeat time, 0 = none */
+
+int PS3_OSK_Active(void);          /* ps3_osk.c */
+void PS3_OSK_Init(void);
+extern int ps3_osk_just_closed;
 
 static void PS3_SetDefaultBind(int keynum, const char *binding)
 {
@@ -406,6 +416,12 @@ static int pad_key_for(int b, int catchers)
 {
     int menu = catchers & (KEYCATCH_UI | KEYCATCH_CGAME | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE);
 
+    /* Controls menu waiting for a key to bind (ui_shared.c sets the cvar):
+     * every button is its game key, so any of them can be bound. START
+     * still sends Escape, which cancels. */
+    if ((catchers & KEYCATCH_UI) && Cvar_VariableIntegerValue("ui_ps3bindwait"))
+        return pad_game_key[b];
+
     if (menu) {
         switch (b) {
         case PB_CROSS:  return K_ENTER;
@@ -434,6 +450,9 @@ static void pad_release_all(void)
         pad_sent[b] = 0;
         pad_repeat_at[b] = 0;
     }
+    if (select_hold)
+        Com_QueueEvent(0, SE_KEY, K_SELECT_HOLD, qfalse, 0, NULL);
+    select_hold = 0;
     for (b = 0; b < 4; b++) {
         if (ps3_axis_prev[b])
             Com_QueueEvent(0, SE_JOYSTICK_AXIS, b == 2 ? 4 : b == 3 ? 3 : b, 0, 0, NULL);
@@ -502,13 +521,32 @@ void PS3_Input_Frame(void)
 
     read_buttons(&ps3_pad_data, cur);
 
+    /* the XMB keyboard (ps3_osk.c) has the pad; the buttons still held when
+     * it closes (the X that accepted) are not new presses for the menu */
+    if (PS3_OSK_Active()) {
+        pad_release_all();
+        return;
+    }
+    if (ps3_osk_just_closed) {
+        ps3_osk_just_closed = 0;
+        for (b = 0; b < PB_COUNT; b++) {
+            pad_down[b] = cur[b];
+            pad_sent[b] = 0;
+            pad_repeat_at[b] = 0;
+        }
+        return;
+    }
+
     catchers = Key_GetCatcher();
     in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
 
     /* SELECT is a modifier: SELECT + TRIANGLE opens the console. On its own
      * it acts on release (a tap), so the combo never triggers its binding. */
-    if (cur[PB_SELECT] && !pad_down[PB_SELECT])
+    if (cur[PB_SELECT] && !pad_down[PB_SELECT]) {
         select_combo = 0;
+        select_hold = 0;
+        select_at = Sys_Milliseconds();
+    }
     if (cur[PB_SELECT] && cur[PB_TRIANGLE] && !pad_down[PB_TRIANGLE]) {
         Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
         Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
@@ -516,8 +554,18 @@ void PS3_Input_Frame(void)
         pad_sent[PB_TRIANGLE] = 0;      /* swallowed: no release to send */
         select_combo = 1;
     }
+    if (cur[PB_SELECT] && pad_down[PB_SELECT] && !select_combo && !select_hold &&
+        Sys_Milliseconds() - select_at >= SELECT_HOLD_MS &&
+        (!(catchers & (KEYCATCH_UI | KEYCATCH_CGAME | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ||
+         ((catchers & KEYCATCH_UI) && Cvar_VariableIntegerValue("ui_ps3bindwait")))) {
+        Com_QueueEvent(0, SE_KEY, K_SELECT_HOLD, qtrue, 0, NULL);
+        select_hold = 1;
+    }
     if (cur[PB_SELECT] != pad_down[PB_SELECT]) {
-        if (!cur[PB_SELECT] && !select_combo) {
+        if (!cur[PB_SELECT] && select_hold) {
+            Com_QueueEvent(0, SE_KEY, K_SELECT_HOLD, qfalse, 0, NULL);
+            select_hold = 0;
+        } else if (!cur[PB_SELECT] && !select_combo) {
             int key = pad_key_for(PB_SELECT, catchers);
             Com_QueueEvent(0, SE_KEY, key, qtrue, 0, NULL);
             Com_QueueEvent(0, SE_KEY, key, qfalse, 0, NULL);
@@ -624,11 +672,33 @@ void IN_Init(void *windowData)
     PS3_SetDefaultBind(K_JOY4,  "+activate");   /* triangle  use */
     PS3_SetDefaultBind(K_JOY5,  "weapprev");    /* L1 */
     PS3_SetDefaultBind(K_JOY6,  "weapnext");    /* R1 */
-    PS3_SetDefaultBind(K_JOY7,  "weapalt");     /* L2        alt fire / scope */
+    /* patch 14 moved alt fire to R3 for the lock-on: move the old defaults
+     * of a saved config once (custom binds stay) */
+    if (Cvar_VariableIntegerValue("in_ps3binds") < 2) {
+        char *b = Key_GetBinding(K_JOY7);
+        if (!b || !b[0] || !Q_stricmp(b, "weapalt"))
+            Key_SetBinding(K_JOY7, "+lockon");
+        b = Key_GetBinding(K_JOY10);
+        if (!b || !b[0] || !Q_stricmp(b, "+zoom"))
+            Key_SetBinding(K_JOY10, "weapalt");
+        Cvar_Get("in_ps3binds", "0", CVAR_ARCHIVE);
+        Cvar_Set("in_ps3binds", "2");
+    }
+    PS3_SetDefaultBind(K_JOY7,  "+lockon");     /* L2        lock-on (cl_input.c) */
     PS3_SetDefaultBind(K_JOY8,  "+attack");     /* R2 */
     PS3_SetDefaultBind(K_JOY9,  "+sprint");     /* L3 */
-    PS3_SetDefaultBind(K_JOY10, "+zoom");       /* R3        binoculars */
+    PS3_SetDefaultBind(K_JOY10, "weapalt");     /* R3        alt fire / scope */
     PS3_SetDefaultBind(K_JOY11, "notebook");    /* select */
+    /* patch 17: the binoculars (without a button since patch 14) go on
+     * SELECT held; d-up gets the kick back (patch 16 had put them there) */
+    if (Cvar_VariableIntegerValue("in_ps3binds") < 4) {
+        char *b = Key_GetBinding(K_JOY12);
+        if (!b || !b[0] || !Q_stricmp(b, "+zoom"))
+            Key_SetBinding(K_JOY12, "+kick");
+        Cvar_Get("in_ps3binds", "0", CVAR_ARCHIVE);
+        Cvar_Set("in_ps3binds", "4");
+    }
+    PS3_SetDefaultBind(K_SELECT_HOLD, "+zoom"); /* select held  binoculars */
     PS3_SetDefaultBind(K_JOY12, "+kick");       /* d-up */
     PS3_SetDefaultBind(K_JOY13, "+useitem");    /* d-down */
     PS3_SetDefaultBind(K_JOY14, "+leanleft");   /* d-left */
@@ -643,7 +713,12 @@ void IN_Init(void *windowData)
     Cvar_Set("j_yaw", "-0.011");
     Cvar_Set("j_forward", "-0.25");
     Cvar_Set("j_side", "0.25");
+    /* the stick look uses "sensitivity" 1..10 (cl_input.c); values from the
+     * menu's old 1..50 scale go back to the default */
+    if (Cvar_VariableValue("sensitivity") > 10)
+        Cvar_Set("sensitivity", "5");
 
+    PS3_OSK_Init();
     ps3_log("IN_Init: default DS3 binds set");
 }
 

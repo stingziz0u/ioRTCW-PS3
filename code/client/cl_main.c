@@ -2948,6 +2948,11 @@ void CL_Frame( int msec ) {
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_NEED_CD );
 	} else if ( cls.endgamemenu ) {
 		cls.endgamemenu = qfalse;
+#ifdef __PS3__
+		// a map started in the same frame as the end of the game has
+		// already shut the ui down: no credits then (it was a fatal error)
+		if ( uivm )
+#endif
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_ENDGAME );
 	} else	if ( clc.state == CA_DISCONNECTED && !( Key_GetCatcher( ) & KEYCATCH_UI )
 		&& !com_sv_running->integer && uivm ) {
@@ -3050,7 +3055,15 @@ void CL_Frame( int msec ) {
 	SCR_UpdateScreen();
 
 	// update audio
+#ifdef __PS3__
+	{
+		unsigned long long t0 = PS3_ProfTick();
+		S_Update();
+		PS3_ProfAdd( PS3_PROF_SOUND, PS3_ProfTick() - t0 );
+	}
+#else
 	S_Update();
+#endif
 
 #ifdef USE_VOIP
 	CL_CaptureVoip();

@@ -30,6 +30,13 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "tr_local.h"
 
+#ifdef __PS3__
+// r_smp: the back end draws with the fog of the view it is drawing (copied
+// by RB_DrawSurfs), not the front end's, which is already on the next frame
+#define glfogsettings   backEnd.fog
+#define glfogNum        backEnd.fogNum
+#endif
+
 /*
 
   THIS ENTIRE FILE IS BACK END
@@ -241,6 +248,15 @@ void R_BindAnimatedImage( textureBundle_t *bundle ) {
 	int64_t index;
 
 	if ( bundle->isVideoMap ) {
+#ifdef __PS3__
+		if ( glConfig.smpActive ) {
+			// render thread: the game thread decodes and uploads it while
+			// the back end is idle (R_SMP_RunVideoMaps); draw the last frame
+			R_SMP_VideoMap( bundle->videoMapHandle );
+			GL_Bind( tr.scratchImage[bundle->videoMapHandle] );
+			return;
+		}
+#endif
 		ri.CIN_RunCinematic( bundle->videoMapHandle );
 		ri.CIN_UploadCinematic( bundle->videoMapHandle );
 		return;
@@ -479,6 +495,11 @@ ProjectDlightTexture
 Perform dynamic lighting with another rendering pass
 ===================
 */
+#ifdef __PS3__
+static float ps3_dlightMod[SHADER_MAX_VERTEXES];        // back end only
+static int ps3_dlightInts[SHADER_MAX_VERTEXES * 3];
+#endif
+
 static void ProjectDlightTexture_scalar( void ) {
 	int		i, l;
 	vec3_t	origin;
@@ -587,11 +608,36 @@ static void ProjectDlightTexture_scalar( void ) {
 				}
 			}
 			clipBits[i] = clip;
+#ifdef __PS3__
+			ps3_dlightMod[i] = modulate;    // colors in two passes below
+#else
 			colors[0] = ri.ftol(floatColor[0] * modulate);
 			colors[1] = ri.ftol(floatColor[1] * modulate);
 			colors[2] = ri.ftol(floatColor[2] * modulate);
 			colors[3] = 255;
+#endif
 		}
+#ifdef __PS3__
+		// ri.ftol is newlib's lrintf through a pointer, and reading an int
+		// right after converting it stalls the PPU: convert all, then pack
+		{
+			int *out = ps3_dlightInts;
+
+			for ( i = 0 ; i < tess.numVertexes ; i++, out += 3 ) {
+				PS3_StoreRoundedInt( floatColor[0] * ps3_dlightMod[i], out + 0 );
+				PS3_StoreRoundedInt( floatColor[1] * ps3_dlightMod[i], out + 1 );
+				PS3_StoreRoundedInt( floatColor[2] * ps3_dlightMod[i], out + 2 );
+			}
+			out = ps3_dlightInts;
+			colors = colorArray[0];
+			for ( i = 0 ; i < tess.numVertexes ; i++, out += 3, colors += 4 ) {
+				colors[0] = out[0];
+				colors[1] = out[1];
+				colors[2] = out[2];
+				colors[3] = 255;
+			}
+		}
+#endif
 
 		// build a list of triangles that need light
 		numIndexes = 0;
@@ -683,7 +729,11 @@ static void RB_FogPass( void ) {
 	fog_t       *fog;
 	int i;
 
+#ifdef __PS3__
+	if ( backEnd.refdef.rdflags & RDF_SNOOPERVIEW ) { // no fog pass in snooper (r_smp: the back end's refdef)
+#else
 	if ( tr.refdef.rdflags & RDF_SNOOPERVIEW ) { // no fog pass in snooper
+#endif
 		return;
 	}
 
@@ -1158,8 +1208,19 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input ) {
 			break;
 		}
 
+#ifdef __PS3__
+		{
+			unsigned long long ps3t0 = PS3_ProfTick(), ps3t1;
+			ComputeColors( pStage );
+			ps3t1 = PS3_ProfTick();
+			ComputeTexCoords( pStage );
+			PS3_ProfAdd( PS3_PROF_COLORS, ps3t1 - ps3t0 );
+			PS3_ProfAdd( PS3_PROF_TCOORDS, PS3_ProfTick() - ps3t1 );
+		}
+#else
 		ComputeColors( pStage );
 		ComputeTexCoords( pStage );
+#endif
 
 		if ( !setArraysOnce ) {
 			qglEnableClientState( GL_COLOR_ARRAY );
@@ -1201,7 +1262,11 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input ) {
 
 			if ( fadeStart ) {
 				fadeEnd = backEnd.currentEntity->e.fadeEndTime;
+#ifdef __PS3__
+				if ( fadeStart > backEnd.refdef.time ) {   // has not started to fade yet (r_smp: the back end's refdef)
+#else
 				if ( fadeStart > tr.refdef.time ) {       // has not started to fade yet
+#endif
 					GL_State( pStage->stateBits );
 				} else
 				{
@@ -1209,11 +1274,19 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input ) {
 					unsigned int tempState;
 					float alphaval;
 
+#ifdef __PS3__
+					if ( fadeEnd < backEnd.refdef.time ) { // entity faded out completely
+#else
 					if ( fadeEnd < tr.refdef.time ) {     // entity faded out completely
+#endif
 						continue;
 					}
 
+#ifdef __PS3__
+					alphaval = (float)( fadeEnd - backEnd.refdef.time ) / (float)( fadeEnd - fadeStart );
+#else
 					alphaval = (float)( fadeEnd - tr.refdef.time ) / (float)( fadeEnd - fadeStart );
+#endif
 
 					tempState = pStage->stateBits;
 					// remove the current blend, and don't write to Z buffer
@@ -1609,6 +1682,17 @@ void RB_StageIteratorLightmappedMultitexture( void ) {
 /*
 ** RB_EndSurface
 */
+#ifdef __PS3__
+// timed for the frame profiler (ps3_prof.c): shading and drawing a batch
+static void RB_EndSurface_( void );
+void RB_EndSurface( void ) {
+	unsigned long long t0 = PS3_ProfTick();
+	RB_EndSurface_();
+	PS3_ProfAdd( PS3_PROF_SHADE, PS3_ProfTick() - t0 );
+}
+#define RB_EndSurface RB_EndSurface_
+static
+#endif
 void RB_EndSurface( void ) {
 	shaderCommands_t *input;
 
@@ -1644,7 +1728,13 @@ void RB_EndSurface( void ) {
 		}
 		// portal sky
 		else {
+#ifdef __PS3__
+			// the scene's own flag: with r_smp the front end already sets
+			// drawskyboxportal for the next frame's scenes
+			if ( !( backEnd.refdef.rdflags & RDF_DRAWSKYBOX ) ) {
+#else
 			if ( !drawskyboxportal ) {
+#endif
 				if ( !( tess.currentStageIteratorFunc == RB_StageIteratorSky ) ) {  // /only/ process sky tris
 					return;
 				}

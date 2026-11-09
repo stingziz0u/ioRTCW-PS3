@@ -14,14 +14,37 @@ void ps3gl_vring_init(void)
         PS3GL_LABEL_VRING_SEG0, PS3GL_LABEL_VRING_SEG1
     };
 
-    ps3gl.vring.seg_capacity = PS3GL_VRING_SIZE / PS3GL_VRING_SEGMENTS;
-    ps3gl.vring.base = (uint8_t *)rsxMemalign(128, PS3GL_VRING_SIZE);
-    if (!ps3gl.vring.base) {
-        printf("[ps3gl] FATAL: failed to allocate vertex ring buffer (%u bytes)\n",
-               PS3GL_VRING_SIZE);
-        return;
+    extern const void *ps3_rsx_io_base;
+    extern size_t      ps3_rsx_io_size;
+    extern void ps3_log(const char *msg);
+    char msg[160];
+
+    ps3gl.vring.base = NULL;
+    if (ps3_rsx_io_base &&
+        ps3_rsx_io_size >= PS3GL_VRING_IO_OFFSET + PS3GL_VRING_IO_SIZE) {
+        uint8_t *io = (uint8_t *)ps3_rsx_io_base + PS3GL_VRING_IO_OFFSET;
+        if (rsxAddressToOffset(io, &ps3gl.vring.base_off) == 0) {
+            ps3gl.vring.base = io;
+            ps3gl.vring.location = GCM_LOCATION_CELL;
+            ps3gl.vring.seg_capacity = PS3GL_VRING_IO_SIZE / PS3GL_VRING_SEGMENTS;
+        }
     }
-    rsxAddressToOffset(ps3gl.vring.base, &ps3gl.vring.base_off);
+    if (!ps3gl.vring.base) {
+        ps3gl.vring.base = (uint8_t *)rsxMemalign(128, PS3GL_VRING_SIZE);
+        if (!ps3gl.vring.base) {
+            printf("[ps3gl] FATAL: failed to allocate vertex ring buffer (%u bytes)\n",
+                   PS3GL_VRING_SIZE);
+            return;
+        }
+        rsxAddressToOffset(ps3gl.vring.base, &ps3gl.vring.base_off);
+        ps3gl.vring.location = GCM_LOCATION_RSX;
+        ps3gl.vring.seg_capacity = PS3GL_VRING_SIZE / PS3GL_VRING_SEGMENTS;
+    }
+    snprintf(msg, sizeof(msg), "ps3gl: vertex ring %u KB x %d in %s memory (offset 0x%08x)",
+             ps3gl.vring.seg_capacity / 1024, PS3GL_VRING_SEGMENTS,
+             ps3gl.vring.location == GCM_LOCATION_CELL ? "main (IO)" : "RSX",
+             ps3gl.vring.base_off);
+    ps3_log(msg);
     ps3gl.vring.head    = 0;
     ps3gl.vring.cur_seg = 0;
 
@@ -42,7 +65,8 @@ void ps3gl_vring_init(void)
 void ps3gl_vring_shutdown(void)
 {
     if (ps3gl.vring.base) {
-        rsxFree(ps3gl.vring.base);
+        if (ps3gl.vring.location == GCM_LOCATION_RSX)
+            rsxFree(ps3gl.vring.base);      /* the IO pool is not ours to free */
         ps3gl.vring.base = NULL;
     }
 }
@@ -55,6 +79,7 @@ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
         /* Segment full for this frame -- refuse to wrap rather than stomp data the GPU hasn't
          * fetched yet (submission runs ahead of GPU execution). Should never trip; if it does, drop the batch, don't silently corrupt the frame. */
         static int warned = 0;
+        ps3gl_stats.dropped++;
         if (!warned) {
             printf("[ps3gl] WARNING: vertex ring segment exhausted this frame "
                    "(need %u, have %u of %u) -- dropping draw\n",
@@ -72,6 +97,9 @@ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
     /* Round up to 16-byte alignment -- every carve must self-align its own start or
      * attribute sub-offsets (TC0/TC1/COLOR) drift and RSX vertex fetch wedges the whole console. */
     ps3gl.vring.head = (ps3gl.vring.head + needed + 15u) & ~15u;
+    ps3gl_stats.verts += (unsigned)count;
+    if (ps3gl.vring.head > ps3gl_stats.vring_peak)
+        ps3gl_stats.vring_peak = ps3gl.vring.head;
 
     return ptr;
 }
@@ -110,6 +138,7 @@ static void flush_immediate(void)
 
     /* Copy vertices into ring buffer */
     uint32_t vb_offset;
+    ps3gl_stats.draws++;
     ps3gl_vertex_t *dst = ps3gl_vring_alloc(count, &vb_offset);
     if (!dst) return;
     memcpy(dst, ps3gl.imm.buf, count * PS3GL_VERTEX_SIZE);
@@ -123,25 +152,25 @@ static void flush_immediate(void)
                              vb_offset + PS3GL_VATTR_POS_OFF,
                              PS3GL_VERTEX_SIZE, 4,
                              GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
+                             ps3gl.vring.location);
     /* Texcoord 0: attr 8, 2 floats */
     rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
                              vb_offset + PS3GL_VATTR_TC0_OFF,
                              PS3GL_VERTEX_SIZE, 2,
                              GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
+                             ps3gl.vring.location);
     /* Texcoord 1: attr 9, 2 floats */
     rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
                              vb_offset + PS3GL_VATTR_TC1_OFF,
                              PS3GL_VERTEX_SIZE, 2,
                              GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
+                             ps3gl.vring.location);
     /* Color: attr 3, 4 unsigned bytes */
     rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
                              vb_offset + PS3GL_VATTR_COLOR_OFF,
                              PS3GL_VERTEX_SIZE, 4,
                              GCM_VERTEX_DATA_TYPE_U8,
-                             GCM_LOCATION_RSX);
+                             ps3gl.vring.location);
 
     /* Draw */
     rsxDrawVertexArray(ctx, gl_to_gcm_prim(ps3gl.imm.prim), 0, count);
@@ -151,6 +180,7 @@ static void flush_immediate(void)
 
 void ps3gl_Begin(GLenum mode)
 {
+    PS3GL_FRONT_CHECK();
     ps3gl.imm.count = 0;
     ps3gl.imm.prim  = mode;
 }

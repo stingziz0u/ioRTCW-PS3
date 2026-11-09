@@ -110,11 +110,23 @@ void R_DlightBmodel( bmodel_t *bmodel ) {
 		surf = bmodel->firstSurface + i;
 
 		if ( *surf->data == SF_FACE ) {
+#ifdef __PS3__
+			( (srfSurfaceFace_t *)surf->data )->dlightBits[SMP_FRONT] = mask;
+#else
 			( (srfSurfaceFace_t *)surf->data )->dlightBits = mask;
+#endif
 		} else if ( *surf->data == SF_GRID ) {
+#ifdef __PS3__
+			( (srfGridMesh_t *)surf->data )->dlightBits[SMP_FRONT] = mask;
+#else
 			( (srfGridMesh_t *)surf->data )->dlightBits = mask;
+#endif
 		} else if ( *surf->data == SF_TRIANGLES ) {
+#ifdef __PS3__
+			( (srfTriangles_t *)surf->data )->dlightBits[SMP_FRONT] = mask;
+#else
 			( (srfTriangles_t *)surf->data )->dlightBits = mask;
+#endif
 		}
 	}
 }

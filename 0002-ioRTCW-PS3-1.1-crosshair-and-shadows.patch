@@ -1,0 +1,118 @@
+From 3636c86bbef000233bf22d05142eec9f4187b183 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 22:28:47 +0000
+Subject: [PATCH] ioRTCW-PS3 1.1: crosshair picker and character shadows in the
+ menus
+
+From issue #1 (cyper-PL):
+
+- The options menus' crosshair picker (ownerdraw UI_CROSSHAIR) is now
+  reachable with the pad; its key handler reports the key as used, so
+  left / right change the crosshair instead of also moving the focus.
+- "Texture Compression" (meaningless on PS3) becomes "Character Shadows",
+  the cg_shadows switch (0 off, 1 blob shadows).
+
+Patch 21.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019SYMuiVSd8MmTqxYvUSCv5
+---
+ PATCHLEVEL          |  2 +-
+ README.md           | 10 ++++++++++
+ code/ui/ui_main.c   |  6 ++++++
+ code/ui/ui_shared.c | 26 ++++++++++++++++++++++++++
+ 4 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/PATCHLEVEL b/PATCHLEVEL
+index 209e3ef..aabe6ec 100644
+--- a/PATCHLEVEL
++++ b/PATCHLEVEL
+@@ -1 +1 @@
+-20
++21
+diff --git a/README.md b/README.md
+index 7535ed2..2c65301 100644
+--- a/README.md
++++ b/README.md
+@@ -39,6 +39,16 @@ to the iortcw renderer:
+   frame, for comparing or if something draws wrong. `make DIAG=1` logs how
+   many stage draws went to the RSX (`[prof] r_ps3_vprog`).
+ 
++From [issue #1](https://github.com/stingziz0u/ioRTCW-PS3/issues/1)
++(cyper-PL):
++
++- **Crosshair picker with the pad**: the one in **Options** (and in the
++  in-game options) was there but the pad skipped it. Select it and press
++  Cross or left / right to go through the game's crosshairs
++  (`cg_drawCrosshair`; the empty one turns it off).
++- **Character Shadows** (blob shadows, `cg_shadows`) in **Options ->
++  System**, in place of "Texture Compression", which does nothing on PS3.
++
+ ## Features
+ 
+ - **The whole single player campaign**: every mission and the six
+diff --git a/code/ui/ui_main.c b/code/ui/ui_main.c
+index fe44e67..927290e 100644
+--- a/code/ui/ui_main.c
++++ b/code/ui/ui_main.c
+@@ -3428,7 +3428,13 @@ static qboolean UI_OwnerDrawHandleKey( int ownerDraw, int flags, float *special,
+ 		UI_RedBlue_HandleKey( flags, special, key );
+ 		break;
+ 	case UI_CROSSHAIR:
++#ifdef __PS3__
++		// say the key was used: with the pad, left / right change the
++		// crosshair instead of also moving the focus off it
++		return UI_Crosshair_HandleKey( flags, special, key );
++#else
+ 		UI_Crosshair_HandleKey( flags, special, key );
++#endif
+ 		break;
+ 	case UI_SELECTEDPLAYER:
+ 		UI_SelectedPlayer_HandleKey( flags, special, key );
+diff --git a/code/ui/ui_shared.c b/code/ui/ui_shared.c
+index dd0e914..ecb8b60 100644
+--- a/code/ui/ui_shared.c
++++ b/code/ui/ui_shared.c
+@@ -3002,6 +3002,10 @@ static qboolean Item_PadFocusable( itemDef_t *item ) {
+ 	if ( item->action || Item_PadRevealer( item ) ) {
+ 		return qtrue;
+ 	}
++	// the crosshair picker of the options menus: X / left / right cycle it
++	if ( item->type == ITEM_TYPE_OWNERDRAW && item->window.ownerDraw == UI_CROSSHAIR ) {
++		return qtrue;
++	}
+ 	switch ( item->type ) {
+ 	case ITEM_TYPE_RADIOBUTTON:
+ 	case ITEM_TYPE_CHECKBOX:
+@@ -6522,6 +6526,28 @@ static void Item_ApplyHacks( itemDef_t *item ) {
+ 	}
+ #endif
+ 
++#ifdef __PS3__
++	// "Texture Compression" means nothing on PS3 (ps3gl has none): it becomes
++	// the character shadows switch (cg_shadows: 0 off, 1 the blob shadows;
++	// 2 and 3, stencil and projected, are left to the console)
++	if ( item->cvar && !Q_stricmp( item->cvar, "r_ext_compressed_textures" ) &&
++		 ( item->type == ITEM_TYPE_YESNO || item->type == ITEM_TYPE_MULTI ) ) {
++		item->cvar = String_Alloc( "cg_shadows" );
++		item->text = String_Alloc( "Character Shadows:" );
++		item->action = NULL;
++		if ( item->type == ITEM_TYPE_MULTI && item->typeData ) {
++			multiDef_t *multiPtr = (multiDef_t *)item->typeData;
++
++			multiPtr->strDef = qfalse;
++			multiPtr->count = 2;
++			multiPtr->cvarList[0] = String_Alloc( "Off" );
++			multiPtr->cvarValue[0] = 0;
++			multiPtr->cvarList[1] = String_Alloc( "On" );
++			multiPtr->cvarValue[1] = 1;
++		}
++	}
++#endif
++
+ 	// Add video modes to system menu
+ 	if ( item->type == ITEM_TYPE_MULTI && item->cvar && !Q_stricmp( item->cvar, "r_mode" ) ) {
+ 		int i;
+-- 
+2.43.0
+

@@ -3428,7 +3428,13 @@ static qboolean UI_OwnerDrawHandleKey( int ownerDraw, int flags, float *special,
 		UI_RedBlue_HandleKey( flags, special, key );
 		break;
 	case UI_CROSSHAIR:
+#ifdef __PS3__
+		// say the key was used: with the pad, left / right change the
+		// crosshair instead of also moving the focus off it
+		return UI_Crosshair_HandleKey( flags, special, key );
+#else
 		UI_Crosshair_HandleKey( flags, special, key );
+#endif
 		break;
 	case UI_SELECTEDPLAYER:
 		UI_SelectedPlayer_HandleKey( flags, special, key );

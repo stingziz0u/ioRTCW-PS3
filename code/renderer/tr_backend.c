@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 // by RB_DrawSurfs), not the front end's, which is already on the next frame
 #define glfogsettings   backEnd.fog
 #define glfogNum        backEnd.fogNum
+#include "../gl/ps3gl_vprog.h"
 #endif
 #include "qgl.h"
 
@@ -1510,6 +1511,8 @@ const void  *RB_DrawBuffer( const void *data ) {
 		// first command, so with r_smp it runs on the render thread
 		extern void PS3_RSX_BeginFrame( void );
 		PS3_RSX_BeginFrame();
+		// r_ps3_vprog for this whole frame: ps3gl keeps one vertex program per frame
+		ps3gl_SetVProg( r_ps3_vprog->integer );
 	}
 #endif
 

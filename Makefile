@@ -26,7 +26,7 @@ ifeq ($(strip $(PSL1GHT)),)
   export PSL1GHT := $(PS3DEV)
 endif
 
-VERSION := 1.0
+VERSION := 1.1
 STAGE   ?= 2
 DEBUG   ?= 0
 DIAG    ?= 0
@@ -132,7 +132,7 @@ JPEG_SRCS := $(addprefix $(C)/jpeg-8c/, \
 
 PS3_CLIENT_SRCS := \
   $(C)/sys/ps3_glimp.c $(C)/input/ps3_input.c $(C)/input/ps3_osk.c $(C)/audio/ps3_snd.c \
-  $(C)/renderer/ps3/qgl_ps3.c \
+  $(C)/renderer/ps3/qgl_ps3.c $(C)/renderer/ps3/tr_ps3_vprog.c \
   $(addprefix $(C)/gl/, ps3gl_main.c ps3gl_states.c ps3gl_matrices.c ps3gl_vertices.c \
     ps3gl_colors.c ps3gl_textures.c ps3gl_draw.c ps3gl_shaders.c)
 

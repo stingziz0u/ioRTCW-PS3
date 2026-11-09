@@ -20,6 +20,25 @@ The upstream README (cvars, console commands) is still valid for anything
 that isn't PS3 specific:
 [iortcw/iortcw](https://github.com/iortcw/iortcw/blob/master/README.md).
 
+## What's new in 1.1
+
+From the November 2026 "RSX changes" of
+[IoQuake3-PS3](https://github.com/Mayo1970/IoQuake3-PS3) (Mayo1970), adapted
+to the iortcw renderer:
+
+- **Vertex work on the RSX** (`r_ps3_vprog 1`, the default). A new vertex
+  program (`q3_vp_gen`) computes each shader stage's colors, texture
+  coordinates (tcGen environment / vector, every tcMod but a second
+  turbulence) and the model lighting on the RSX, plus the wave / bulge /
+  move deforms, instead of a PPU loop over every vertex of every stage. The
+  later stages of a surface reuse the first stage's copy of the vertices
+  and its 16-bit indices. RTCW's own cases (alphaGen normalzfade, tcGen
+  firerise, fading models, fire-rise deforms) still run on the PPU, as
+  in 1.0. GL fog is drawn by both vertex programs.
+- `r_ps3_vprog 0` in the console goes back to 1.0's PPU path, from the next
+  frame, for comparing or if something draws wrong. `make DIAG=1` logs how
+  many stage draws went to the RSX (`[prof] r_ps3_vprog`).
+
 ## Features
 
 - **The whole single player campaign**: every mission and the six
@@ -59,7 +78,7 @@ that isn't PS3 specific:
 
 ## Installation
 
-1. Install `iortcw-ps3-1.0.pkg` from the XMB (it shows up as "Return to
+1. Install `iortcw-ps3-1.1.pkg` from the XMB (it shows up as "Return to
    Castle Wolfenstein"). This creates
    `/dev_hdd0/game/IORTCWPS3/USRDIR/main/`, empty and ready to fill.
 2. By FTP, copy these files from your game's `Main` folder:
@@ -100,7 +119,7 @@ the log says why, and a missing `.pk3` is the usual cause.
    ```bash
    git clone https://github.com/stingziz0u/ioRTCW-PS3.git
    cd ioRTCW-PS3
-   make -j4          # -> iortcw-ps3-1.0.pkg
+   make -j4          # -> iortcw-ps3-1.1.pkg
    make verify       # shows the build stamp of the tree and of the PKG
    ```
 
@@ -109,7 +128,7 @@ Every variant builds in its own folder (`obj/<variant>`), so no
 
 ```bash
 make DIAG=1       # on-screen FPS, frame profile and load hitches in the log
-                  #   -> iortcw-ps3-1.0-diag.pkg
+                  #   -> iortcw-ps3-1.1-diag.pkg
 make MAPWALK=1    # loads and plays every map, logs memory and frame times, quits
                   #   -> iortcw-ps3-mapwalk.pkg
 make MAPWALK=1 WALKSECS=90   # the same, 90 s per map in god mode, cutscene
@@ -125,7 +144,9 @@ single 64 KB TOC, no `r2off` stubs) and fails if a change breaks them.
 The shaders are already assembled into `code/gl/ps3gl_shader_data.h`. They
 are written in NV40 assembly (`code/gl/shaders/asm/`), so rebuilding them
 with `code/gl/shaders/assemble_shaders.sh` only needs PSL1GHT's `cgcomp`,
-not NVIDIA's Cg compiler.
+not NVIDIA's Cg compiler. The one exception is `asm/q3_vp_gen.vpa`, generated
+from `q3_vp_gen.vcg` with `cgc` (Ubuntu's `nvidia-cg-toolkit` package):
+only needed if you change the `.vcg`.
 
 ## Controls
 

@@ -1939,6 +1939,11 @@ extern backEndData_t   *backEndData;    // the second one may not be allocated
 // r_smp: the back end runs on the PPU's second hardware thread (ps3_glimp.c)
 extern backEndData_t   *r_smpBackEndData[2];    // backEndData is the front end's one
 extern cvar_t  *r_smp;
+// r_ps3_vprog: stage colors / texcoords / deforms on the RSX (renderer/ps3/tr_ps3_vprog.c)
+extern cvar_t  *r_ps3_vprog;
+qboolean RB_PS3_StageParams( shaderStage_t *pStage );
+qboolean RB_PS3_VertexLitParams( void );
+qboolean RB_PS3_SurfaceDeforms( void );
 void R_InitCommandBuffers( void );
 void R_ShutdownCommandBuffers( void );
 void R_SMP_VideoMap( int handle );

@@ -188,6 +188,8 @@ void ps3gl_begin_frame(void)
     }
 
     ps3gl.vring.head = 0;
+    ps3gl.vcopy.valid = 0;     /* r_ps3_vprog: last frame's copy lives in the other segment */
+    ps3gl.vp_pending = 0;
 
     ps3gl.dirty     = PS3GL_DIRTY_ALL;
     ps3gl.mv.dirty  = 1;

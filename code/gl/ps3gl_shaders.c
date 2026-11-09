@@ -1,8 +1,9 @@
 /* ps3gl_shaders.c -- GL-to-RSX layer: shader program management. One shared vertex
- * program, one fragment program per texenv mode. If PS3GL_SHADERS_AVAILABLE==0 the shaders weren't compiled -- every draw is a silent no-op, nothing renders. */
+ * program (q3_vp, or q3_vp_gen under r_ps3_vprog 1), one fragment program per texenv mode. If PS3GL_SHADERS_AVAILABLE==0 the shaders weren't compiled -- every draw is a silent no-op, nothing renders. */
 
 #include "ps3gl.h"
 #include "ps3gl_shader_data.h"
+#include <stddef.h>
 #include <stdio.h>
 
 extern void ps3_log(const char *msg);
@@ -12,6 +13,24 @@ extern const float *ps3gl_get_mvp(void);
 extern uint32_t ps3gl_get_mvp_generation(void);
 
 #if PS3GL_SHADERS_AVAILABLE
+
+#if PS3GL_SHADERS_VPGEN
+/* q3_vp_gen's uniforms: one table, so the names cost one TOC entry, not one each */
+#define VPU(n, f, l) { n, offsetof(ps3gl_vparams_t, f), l }
+static const struct { const char *name; size_t off; int len; } vp_uniforms[PS3GL_VP_UNIFORMS] = {
+    VPU("cmul", cmul, 4),       VPU("cadd", cadd, 4),
+    VPU("tm0", tm[0], 16),      VPU("tm1", tm[1], 16),
+    VPU("tsel", tsel, 4),
+    VPU("turb0", turb[0], 4),   VPU("turb1", turb[1], 4),
+    VPU("turbm0", turbm[0], 4), VPU("turbm1", turbm[1], 4),
+    VPU("csel", csel, 4),       VPU("lamb", lamb, 4),
+    VPU("ldir", ldir, 4),       VPU("ldirc", ldirc, 4),   VPU("vorg", vorg, 4), VPU("porg", porg, 4),
+    VPU("dfa0", df[0][0], 4),   VPU("dfb0", df[0][4], 4), VPU("dfc0", df[0][8], 4), VPU("dfm0", df[0][12], 4),
+    VPU("dfa1", df[1][0], 4),   VPU("dfb1", df[1][4], 4), VPU("dfc1", df[1][8], 4), VPU("dfm1", df[1][12], 4),
+    VPU("dfa2", df[2][0], 4),   VPU("dfb2", df[2][4], 4), VPU("dfc2", df[2][8], 4), VPU("dfm2", df[2][12], 4),
+};
+#undef VPU
+#endif
 
 /* Shader loading helpers */
 
@@ -75,9 +94,35 @@ void ps3gl_shaders_init(void)
 #endif
     ps3gl.fog_uploaded_gen = 0;
 
+    /* r_ps3_vprog 1's VP: any missing uniform keeps r_ps3_vprog off rather than drawing garbage */
+    memset(&ps3gl.vpgen, 0, sizeof(ps3gl.vpgen));
+#if PS3GL_SHADERS_VPGEN
+    {
+        ps3gl_vpgen_t *g = &ps3gl.vpgen;
+        int ok;
+
+        g->vp = (rsxVertexProgram *)shader_vp_gen_data;
+        rsxVertexProgramGetUCode(g->vp, &g->ucode, &g->ucode_size);
+        g->mvp = rsxVertexProgramGetConst(g->vp, "mvp");
+        g->fog_params = rsxVertexProgramGetConst(g->vp, "fogParams");
+        g->fog_color = rsxVertexProgramGetConst(g->vp, "fogColor");
+        ok = g->mvp && g->fog_params && g->fog_color;
+        for (int i = 0; i < PS3GL_VP_UNIFORMS; i++) {
+            g->u[i] = rsxVertexProgramGetConst(g->vp, vp_uniforms[i].name);
+            ok = ok && g->u[i];
+        }
+        if (!ok)
+            g->vp = NULL;
+        ps3_log(ok ? "ps3gl: q3_vp_gen loaded (r_ps3_vprog)"
+                   : "ps3gl: q3_vp_gen uniforms missing, r_ps3_vprog disabled");
+    }
+#endif
+
     ps3gl.active_shader = -1;
     ps3gl.active_vp = NULL;
+    ps3gl.loaded_vp = NULL;
     ps3gl.mvp_uploaded_gen = 0;
+    ps3gl.vp_up_valid = 0;
     printf("[ps3gl] Shaders loaded: %d modes\n", PS3GL_TENV_COUNT);
 }
 
@@ -111,7 +156,8 @@ int ps3gl_shader_key(void)
  * clip w, which is the eye distance along the view axis. */
 static float s_fog_logged[4];
 
-static void ps3gl_upload_fog(gcmContextData *ctx, ps3gl_shader_t *s)
+static void ps3gl_upload_fog(gcmContextData *ctx, rsxVertexProgram *vp,
+                             rsxProgramConst *params_const, rsxProgramConst *color_const)
 {
     float p[4];
 
@@ -129,8 +175,8 @@ static void ps3gl_upload_fog(gcmContextData *ctx, ps3gl_shader_t *s)
         p[2] = -ps3gl.fog.density * 1.4426950409f;   /* e^-x = 2^(-x log2 e) */
         p[3] = 0.0f;
     }
-    rsxSetVertexProgramParameter(ctx, s->vp, s->fog_params_const, p);
-    rsxSetVertexProgramParameter(ctx, s->vp, s->fog_color_const, ps3gl.fog.color);
+    rsxSetVertexProgramParameter(ctx, vp, params_const, p);
+    rsxSetVertexProgramParameter(ctx, vp, color_const, ps3gl.fog.color);
     ps3gl.fog_uploaded_gen = ps3gl.fog.gen;
 
     /* say which fogs get drawn (the first few changes) */
@@ -165,11 +211,29 @@ void ps3gl_apply_shader(void)
     gcmContextData *ctx = ps3gl_get_ctx();
     if (!ctx) return;
 
-    /* All shader slots share one VP (see ps3gl_shaders_init) -- reload it only
-     * when it's not already bound, not on every FP/texenv key change. */
-    if (s->vp != ps3gl.active_vp) {
-        rsxLoadVertexProgram(ctx, s->vp, s->vp_ucode);
-        ps3gl.active_vp = s->vp;
+    /* All FP slots share one VP: q3_vp, or q3_vp_gen under r_ps3_vprog 1. Reload it only when it is
+     * not bound. The two keep their constants in different registers: after a switch, every constant
+     * (mvp, fog, the q3_vp_gen uniforms) is uploaded again. */
+    rsxVertexProgram *vp = s->vp;
+    void *vp_ucode = s->vp_ucode;
+    rsxProgramConst *mvp_const = s->mvp_const;
+    rsxProgramConst *fogp_const = s->fog_params_const, *fogc_const = s->fog_color_const;
+    if (ps3gl_VProgOn()) {
+        vp = ps3gl.vpgen.vp;
+        vp_ucode = ps3gl.vpgen.ucode;
+        mvp_const = ps3gl.vpgen.mvp;
+        fogp_const = ps3gl.vpgen.fog_params;
+        fogc_const = ps3gl.vpgen.fog_color;
+    }
+    if (vp != ps3gl.active_vp) {
+        rsxLoadVertexProgram(ctx, vp, vp_ucode);
+        if (vp != ps3gl.loaded_vp) {
+            ps3gl.loaded_vp = vp;
+            ps3gl.mvp_uploaded_gen = ps3gl_get_mvp_generation() - 1;
+            ps3gl.fog_uploaded_gen = ps3gl.fog.gen - 1;
+        }
+        ps3gl.active_vp = vp;
+        ps3gl.vp_up_valid = 0;
     }
 
     if (key != ps3gl.active_shader) {
@@ -184,15 +248,15 @@ void ps3gl_apply_shader(void)
     /* MVP constant is independent of which FP is bound -- only re-patch it
      * when it changed since the last upload (patching RSX microcode isn't free). */
     uint32_t mvp_gen = ps3gl_get_mvp_generation();
-    if (s->mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
+    if (mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
         const float *mvp = ps3gl_get_mvp();
-        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
+        rsxSetVertexProgramParameter(ctx, vp, mvp_const, mvp);
         ps3gl.mvp_uploaded_gen = mvp_gen;
     }
 
 #if PS3GL_SHADERS_FOG
-    if (key >= PS3GL_TENV_COUNT && ps3gl.fog_uploaded_gen != ps3gl.fog.gen)
-        ps3gl_upload_fog(ctx, s);
+    if (key >= PS3GL_TENV_COUNT && ps3gl.fog_uploaded_gen != ps3gl.fog.gen && fogp_const && fogc_const)
+        ps3gl_upload_fog(ctx, vp, fogp_const, fogc_const);
 #endif
 
     /* Upload the world-space clip plane only if this shader binary was recompiled to support
@@ -202,6 +266,59 @@ void ps3gl_apply_shader(void)
                                      ps3gl.clip_plane);
     }
 }
+
+#if PS3GL_SHADERS_VPGEN
+/* Identity: TEXCOORD0 = ATTR8, TEXCOORD1 = ATTR9, COLOR0 = ATTR3, every select 0: q3_vp_gen draws as q3_vp */
+static const ps3gl_vparams_t vp_identity = {
+    .cmul = { 1.0f, 1.0f, 1.0f, 1.0f },
+    .tm = { { 1, 0, 0, 0, 0, 0, 0, 0,  0, 1, 0, 0, 0, 0, 0, 0 },
+            { 0, 0, 1, 0, 0, 0, 0, 0,  0, 0, 0, 1, 0, 0, 0, 0 } },
+};
+
+/* Upload only the uniforms that differ from what the RSX holds: each one is a command-buffer write. */
+void ps3gl_apply_vparams(const ps3gl_vparams_t *p)
+{
+    gcmContextData *ctx = ps3gl_get_ctx();
+    ps3gl_vpgen_t *g = &ps3gl.vpgen;
+
+    if (!ctx || !g->vp || ps3gl.active_vp != g->vp) return;
+    if (!p) p = &vp_identity;
+
+    for (int i = 0; i < PS3GL_VP_UNIFORMS; i++) {
+        const float *src = (const float *)((const char *)p + vp_uniforms[i].off);
+        float *up = (float *)((char *)&ps3gl.vp_up + vp_uniforms[i].off);
+        size_t bytes = vp_uniforms[i].len * sizeof(float);
+
+        if (ps3gl.vp_up_valid && !memcmp(up, src, bytes))
+            continue;
+        rsxSetVertexProgramParameter(ctx, g->vp, g->u[i], src);
+        memcpy(up, src, bytes);
+    }
+    ps3gl.vp_up_valid = 1;
+}
+
+void ps3gl_SetVProg(int on)
+{
+    if ((uintptr_t)ps3gl_ptr > 0x1000)
+        ps3gl.vprog = on;
+}
+
+int ps3gl_VProgOn(void)
+{
+    return (uintptr_t)ps3gl_ptr > 0x1000 && ps3gl.vprog && ps3gl.vpgen.vp;
+}
+
+void ps3gl_VertexParams(const ps3gl_vparams_t *p)
+{
+    ps3gl.vp_next = *p;
+    ps3gl.vp_pending = 1;
+}
+#else
+void ps3gl_apply_vparams(const ps3gl_vparams_t *p) { (void)p; }
+void ps3gl_SetVProg(int on) { (void)on; }
+int  ps3gl_VProgOn(void) { return 0; }
+void ps3gl_VertexParams(const ps3gl_vparams_t *p) { (void)p; }
+#endif
 
 #else /* PS3GL_SHADERS_AVAILABLE == 0 */
 
@@ -222,5 +339,10 @@ void ps3gl_apply_shader(void)
 {
     /* No shaders to apply -- draws will produce no visible output */
 }
+
+void ps3gl_apply_vparams(const ps3gl_vparams_t *p) { (void)p; }
+void ps3gl_SetVProg(int on) { (void)on; }
+int  ps3gl_VProgOn(void) { return 0; }
+void ps3gl_VertexParams(const ps3gl_vparams_t *p) { (void)p; }
 
 #endif /* PS3GL_SHADERS_AVAILABLE */

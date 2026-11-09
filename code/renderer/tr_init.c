@@ -126,6 +126,7 @@ cvar_t  *r_ati_fsaa_samples;        //DAJ valids are 1, 2, 4
 cvar_t  *r_ignoreGLErrors;
 #ifdef __PS3__
 cvar_t  *r_smp;
+cvar_t  *r_ps3_vprog;
 #endif
 cvar_t  *r_logFile;
 
@@ -1286,6 +1287,9 @@ void R_Register( void ) {
 	// the back end on the PPU's second hardware thread; latched: applies on
 	// the next map load or vid_restart
 	r_smp = ri.Cvar_Get( "r_smp", "1", CVAR_ARCHIVE | CVAR_LATCH );
+	// 1: q3_vp_gen computes stage colors, texcoords and deforms on the RSX
+	// (tr_ps3_vprog.c); 0: the PPU does, as in 1.0. Applies from the next frame.
+	r_ps3_vprog = ri.Cvar_Get( "r_ps3_vprog", "1", CVAR_ARCHIVE );
 #endif
 	r_fastsky = ri.Cvar_Get( "r_fastsky", "0", CVAR_ARCHIVE );
 	r_inGameVideo = ri.Cvar_Get( "r_inGameVideo", "1", CVAR_ARCHIVE );

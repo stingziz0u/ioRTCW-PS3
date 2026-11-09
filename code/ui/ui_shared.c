@@ -3002,6 +3002,10 @@ static qboolean Item_PadFocusable( itemDef_t *item ) {
 	if ( item->action || Item_PadRevealer( item ) ) {
 		return qtrue;
 	}
+	// the crosshair picker of the options menus: X / left / right cycle it
+	if ( item->type == ITEM_TYPE_OWNERDRAW && item->window.ownerDraw == UI_CROSSHAIR ) {
+		return qtrue;
+	}
 	switch ( item->type ) {
 	case ITEM_TYPE_RADIOBUTTON:
 	case ITEM_TYPE_CHECKBOX:
@@ -6519,6 +6523,28 @@ static void Item_ApplyHacks( itemDef_t *item ) {
 		editPtr->minVal = 70;
 		editPtr->maxVal = 100;
 		editPtr->defVal = 88;
+	}
+#endif
+
+#ifdef __PS3__
+	// "Texture Compression" means nothing on PS3 (ps3gl has none): it becomes
+	// the character shadows switch (cg_shadows: 0 off, 1 the blob shadows;
+	// 2 and 3, stencil and projected, are left to the console)
+	if ( item->cvar && !Q_stricmp( item->cvar, "r_ext_compressed_textures" ) &&
+		 ( item->type == ITEM_TYPE_YESNO || item->type == ITEM_TYPE_MULTI ) ) {
+		item->cvar = String_Alloc( "cg_shadows" );
+		item->text = String_Alloc( "Character Shadows:" );
+		item->action = NULL;
+		if ( item->type == ITEM_TYPE_MULTI && item->typeData ) {
+			multiDef_t *multiPtr = (multiDef_t *)item->typeData;
+
+			multiPtr->strDef = qfalse;
+			multiPtr->count = 2;
+			multiPtr->cvarList[0] = String_Alloc( "Off" );
+			multiPtr->cvarValue[0] = 0;
+			multiPtr->cvarList[1] = String_Alloc( "On" );
+			multiPtr->cvarValue[1] = 1;
+		}
 	}
 #endif
 

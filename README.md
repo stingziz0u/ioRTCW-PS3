@@ -39,6 +39,16 @@ to the iortcw renderer:
   frame, for comparing or if something draws wrong. `make DIAG=1` logs how
   many stage draws went to the RSX (`[prof] r_ps3_vprog`).
 
+From [issue #1](https://github.com/stingziz0u/ioRTCW-PS3/issues/1)
+(cyper-PL):
+
+- **Crosshair picker with the pad**: the one in **Options** (and in the
+  in-game options) was there but the pad skipped it. Select it and press
+  Cross or left / right to go through the game's crosshairs
+  (`cg_drawCrosshair`; the empty one turns it off).
+- **Character Shadows** (blob shadows, `cg_shadows`) in **Options ->
+  System**, in place of "Texture Compression", which does nothing on PS3.
+
 ## Features
 
 - **The whole single player campaign**: every mission and the six

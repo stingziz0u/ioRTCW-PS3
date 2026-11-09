@@ -73,8 +73,16 @@ void ps3gl_vring_shutdown(void)
 
 ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
 {
-    uint32_t needed = (uint32_t)(count * PS3GL_VERTEX_SIZE);
+    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)ps3gl_vring_alloc_bytes((uint32_t)(count * PS3GL_VERTEX_SIZE), out_offset);
 
+    if (ptr)
+        ps3gl_stats.verts += (unsigned)count;
+    return ptr;
+}
+
+/* any 16-byte aligned carve of the current segment (r_ps3_vprog's normals use it too) */
+void *ps3gl_vring_alloc_bytes(uint32_t needed, uint32_t *out_offset)
+{
     if (ps3gl.vring.head + needed > ps3gl.vring.seg_capacity) {
         /* Segment full for this frame -- refuse to wrap rather than stomp data the GPU hasn't
          * fetched yet (submission runs ahead of GPU execution). Should never trip; if it does, drop the batch, don't silently corrupt the frame. */
@@ -91,13 +99,12 @@ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
     }
 
     uint32_t seg_base = (uint32_t)ps3gl.vring.cur_seg * ps3gl.vring.seg_capacity;
-    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)(ps3gl.vring.base + seg_base + ps3gl.vring.head);
+    uint8_t *ptr = ps3gl.vring.base + seg_base + ps3gl.vring.head;
     *out_offset = ps3gl.vring.base_off + seg_base + ps3gl.vring.head;
 
     /* Round up to 16-byte alignment -- every carve must self-align its own start or
      * attribute sub-offsets (TC0/TC1/COLOR) drift and RSX vertex fetch wedges the whole console. */
     ps3gl.vring.head = (ps3gl.vring.head + needed + 15u) & ~15u;
-    ps3gl_stats.verts += (unsigned)count;
     if (ps3gl.vring.head > ps3gl_stats.vring_peak)
         ps3gl_stats.vring_peak = ps3gl.vring.head;
 
@@ -135,6 +142,7 @@ static void flush_immediate(void)
     ps3gl_apply_matrices();
     ps3gl_apply_textures();
     ps3gl_apply_shader();
+    ps3gl_apply_vparams(NULL);      /* q3_vp_gen (r_ps3_vprog): identity */
 
     /* Copy vertices into ring buffer */
     uint32_t vb_offset;
@@ -171,6 +179,13 @@ static void flush_immediate(void)
                              PS3GL_VERTEX_SIZE, 4,
                              GCM_VERTEX_DATA_TYPE_U8,
                              ps3gl.vring.location);
+    /* q3_vp_gen fetches ATTR2 on every draw: point it at the positions, its selects keep it unread */
+    if (ps3gl.vpgen.vp && ps3gl.active_vp == ps3gl.vpgen.vp)
+        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_NORMAL, 0,
+                                 vb_offset + PS3GL_VATTR_POS_OFF,
+                                 PS3GL_VERTEX_SIZE, 3,
+                                 GCM_VERTEX_DATA_TYPE_F32,
+                                 ps3gl.vring.location);
 
     /* Draw */
     rsxDrawVertexArray(ctx, gl_to_gcm_prim(ps3gl.imm.prim), 0, count);

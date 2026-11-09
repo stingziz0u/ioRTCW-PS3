@@ -35,6 +35,7 @@ static double gl_sum_draws, gl_sum_verts, gl_sum_indices;
 static double gl_slow_draws, gl_slow_verts, gl_slow_indices;
 static unsigned gl_worst_draws, gl_worst_verts;
 static unsigned gl_peak_vring, gl_dropped;
+static double gl_sum_vprog, gl_sum_reused;
 
 static double prof_us_per_tick;
 
@@ -129,6 +130,8 @@ void PS3_ProfFrameEnd(double frame_us)
     if (ps3gl_stats.vring_peak > gl_peak_vring)
         gl_peak_vring = ps3gl_stats.vring_peak;
     gl_dropped += ps3gl_stats.dropped;
+    gl_sum_vprog += ps3gl_stats.vprog_draws;
+    gl_sum_reused += ps3gl_stats.vcopy_reused;
     prof_frames++;
 
     memset(prof_cur, 0, sizeof(prof_cur));
@@ -198,6 +201,7 @@ void PS3_ProfReset(void)
     gl_slow_draws = gl_slow_verts = gl_slow_indices = 0;
     gl_worst_draws = gl_worst_verts = 0;
     gl_peak_vring = gl_dropped = 0;
+    gl_sum_vprog = gl_sum_reused = 0;
 }
 
 void PS3_ProfReport(void)
@@ -213,6 +217,8 @@ void PS3_ProfReport(void)
                      gl_worst_draws, gl_worst_verts, 0);
         PS3_Logf("[prof] vertex ring peak %u KB of %u KB per frame, %u draws dropped",
                  gl_peak_vring / 1024, PS3GL_VRING_SEGMENT_KB, gl_dropped);
+        PS3_Logf("[prof] r_ps3_vprog: %.0f stage draws per frame on the RSX, %.0f reused a copy",
+                 gl_sum_vprog / prof_frames, gl_sum_reused / prof_frames);
         /* the cgame slot is CL_CGameRendering; the game module runs in sv */
         PS3_ProfSyscallLine(1, prof_frames, prof_sum[PS3_PROF_CGAME]);
         PS3_ProfSyscallLine(0, prof_frames, prof_sum[PS3_PROF_SV]);

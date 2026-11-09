@@ -1,0 +1,326 @@
+# q3_vp_gen.vpa -- GENERATED from ../q3_vp_gen.vcg by: cgc -profile vp40 -ifcvt none (nvidia-cg-toolkit 3.1).
+# Edit the .vcg and regenerate; assemble_shaders.sh only assembles this file.
+!!ARBvp1.0
+OPTION NV_vertex_program3;
+# cgc version 3.1.0013, build date Apr 24 2012
+# command line args: -profile vp40 -ifcvt none
+# source file: q3_vp_gen.vcg
+#vendor NVIDIA Corporation
+#version 3.1.0.13
+#profile vp40
+#program main
+#semantic main.mvp
+#semantic main.fogParams
+#semantic main.fogColor
+#semantic main.cmul
+#semantic main.cadd
+#semantic main.tm0
+#semantic main.tm1
+#semantic main.tsel
+#semantic main.turb0
+#semantic main.turb1
+#semantic main.turbm0
+#semantic main.turbm1
+#semantic main.csel
+#semantic main.lamb
+#semantic main.ldir
+#semantic main.ldirc
+#semantic main.vorg
+#semantic main.porg
+#semantic main.dfa0
+#semantic main.dfb0
+#semantic main.dfc0
+#semantic main.dfm0
+#semantic main.dfa1
+#semantic main.dfb1
+#semantic main.dfc1
+#semantic main.dfm1
+#semantic main.dfa2
+#semantic main.dfb2
+#semantic main.dfc2
+#semantic main.dfm2
+#var float4 position : $vin.ATTR0 : ATTR0 : 0 : 1
+#var float3 normal : $vin.ATTR2 : ATTR2 : 1 : 1
+#var float4 color : $vin.ATTR3 : ATTR3 : 2 : 1
+#var float2 st : $vin.ATTR8 : ATTR8 : 3 : 1
+#var float2 lm : $vin.ATTR9 : ATTR9 : 4 : 1
+#var float4x4 mvp :  : c[0], 4 : 5 : 1
+#var float4 fogParams :  : c[12] : 6 : 1
+#var float4 fogColor :  : c[13] : 7 : 1
+#var float4 cmul :  : c[14] : 8 : 1
+#var float4 cadd :  : c[15] : 9 : 1
+#var float4x4 tm0 :  : c[4], 4 : 10 : 1
+#var float4x4 tm1 :  : c[8], 4 : 11 : 1
+#var float4 tsel :  : c[16] : 12 : 1
+#var float4 turb0 :  : c[17] : 13 : 1
+#var float4 turb1 :  : c[18] : 14 : 1
+#var float4 turbm0 :  : c[19] : 15 : 1
+#var float4 turbm1 :  : c[20] : 16 : 1
+#var float4 csel :  : c[21] : 17 : 1
+#var float4 lamb :  : c[22] : 18 : 1
+#var float4 ldir :  : c[23] : 19 : 1
+#var float4 ldirc :  : c[24] : 20 : 1
+#var float4 vorg :  : c[25] : 21 : 1
+#var float4 porg :  : c[26] : 22 : 1
+#var float4 dfa0 :  : c[27] : 23 : 1
+#var float4 dfb0 :  : c[28] : 24 : 1
+#var float4 dfc0 :  : c[29] : 25 : 1
+#var float4 dfm0 :  : c[30] : 26 : 1
+#var float4 dfa1 :  : c[31] : 27 : 1
+#var float4 dfb1 :  : c[32] : 28 : 1
+#var float4 dfc1 :  : c[33] : 29 : 1
+#var float4 dfm1 :  : c[34] : 30 : 1
+#var float4 dfa2 :  : c[35] : 31 : 1
+#var float4 dfb2 :  : c[36] : 32 : 1
+#var float4 dfc2 :  : c[37] : 33 : 1
+#var float4 dfm2 :  : c[38] : 34 : 1
+#var float4 oPosition : $vout.POSITION : HPOS : 35 : 1
+#var float4 oColor : $vout.COLOR0 : COL0 : 36 : 1
+#var float2 oTc0 : $vout.TEXCOORD0 : TEX0 : 37 : 1
+#var float2 oTc1 : $vout.TEXCOORD1 : TEX1 : 38 : 1
+#var float4 oFog : $vout.TEXCOORD2 : TEX2 : 39 : 1
+#const c[39] = 1 0.5 2 6.2831855
+#const c[40] = 0 -960 1980 96
+#const c[41] = 9.9999997e-21 0.0009765625
+PARAM c[42] = { program.local[0..38],
+		{ 1, 0.5, 2, 6.2831855 },
+		{ 0, -960, 1980, 96 },
+		{ 9.9999997e-21, 0.0009765625 } };
+TEMP R0;
+TEMP R1;
+TEMP R2;
+TEMP R3;
+TEMP R4;
+TEMP R5;
+TEMP RC, HC;
+BB0:
+MOVC  RC.x, c[29].z;
+MOV   R2.xyz, vertex.attrib[0];
+BRA   BB6 (LE.x);
+BB1:
+ADD   R0.x, vertex.attrib[0], vertex.attrib[0].y;
+MOVC  RC.x, c[33].z;
+MUL   R0.y, vertex.attrib[8].x, c[27].w;
+ADD   R0.x, vertex.attrib[0].z, R0;
+MAD   R0.x, R0, c[27].z, R0.y;
+ADD   R0.w, c[28].x, R0.x;
+FRC   R0.x, R0.w;
+MUL   R0.y, R0.x, c[39].z;
+FRC   R0.y, R0;
+MAD   R0.z, R0.y, c[39], -c[39].x;
+SGE   R0.y, R0.x, c[39];
+MAD   R0.y, -R0, c[39].z, c[39].x;
+MUL   R0.w, R0, c[39];
+ADD   R0.z, c[39].x, -|R0|;
+MUL   R1.x, R0.y, c[28].z;
+SIN   R0.w, R0.w;
+MUL   R0.y, R0, R0.z;
+MAD   R0.w, R0, c[28].y, R1.x;
+MAD   R0.y, R0, c[28].w, R0.w;
+MAD   R0.y, R0.x, c[29].x, R0;
+ADD   R0.x, c[39], -R0;
+MAD   R0.x, R0, c[29].y, R0.y;
+MAD   R0.x, R0, c[27].y, c[27];
+MUL   R0.xyz, vertex.attrib[2], R0.x;
+ADD   R0.xyz, R0, vertex.attrib[0];
+ADD   R2.xyz, c[30], R0;
+BRA   BB5 (LE.x);
+BB2:
+ADD   R0.x, R2, R2.y;
+MOVC  RC.x, c[37].z;
+MUL   R0.y, vertex.attrib[8].x, c[31].w;
+ADD   R0.x, R2.z, R0;
+MAD   R0.x, R0, c[31].z, R0.y;
+ADD   R0.w, c[32].x, R0.x;
+FRC   R0.x, R0.w;
+MUL   R0.y, R0.x, c[39].z;
+FRC   R0.y, R0;
+MAD   R0.z, R0.y, c[39], -c[39].x;
+SGE   R0.y, R0.x, c[39];
+MAD   R0.y, -R0, c[39].z, c[39].x;
+MUL   R0.w, R0, c[39];
+ADD   R0.z, c[39].x, -|R0|;
+MUL   R1.x, R0.y, c[32].z;
+SIN   R0.w, R0.w;
+MUL   R0.y, R0, R0.z;
+MAD   R0.w, R0, c[32].y, R1.x;
+MAD   R0.y, R0, c[32].w, R0.w;
+MAD   R0.y, R0.x, c[33].x, R0;
+ADD   R0.x, c[39], -R0;
+MAD   R0.x, R0, c[33].y, R0.y;
+MAD   R0.x, R0, c[31].y, c[31];
+MAD   R0.xyz, vertex.attrib[2], R0.x, R2;
+ADD   R2.xyz, c[34], R0;
+BRA   BB4 (LE.x);
+BB3:
+ADD   R0.x, R2, R2.y;
+MUL   R0.y, vertex.attrib[8].x, c[35].w;
+ADD   R0.x, R2.z, R0;
+MAD   R0.x, R0, c[35].z, R0.y;
+ADD   R0.w, c[36].x, R0.x;
+FRC   R0.x, R0.w;
+MUL   R0.y, R0.x, c[39].z;
+FRC   R0.y, R0;
+MAD   R0.z, R0.y, c[39], -c[39].x;
+SGE   R0.y, R0.x, c[39];
+MAD   R0.y, -R0, c[39].z, c[39].x;
+MUL   R0.w, R0, c[39];
+ADD   R0.z, c[39].x, -|R0|;
+MUL   R1.x, R0.y, c[36].z;
+SIN   R0.w, R0.w;
+MUL   R0.y, R0, R0.z;
+MAD   R0.w, R0, c[36].y, R1.x;
+MAD   R0.y, R0, c[36].w, R0.w;
+MAD   R0.y, R0.x, c[37].x, R0;
+ADD   R0.x, c[39], -R0;
+MAD   R0.x, R0, c[37].y, R0.y;
+MAD   R0.x, R0, c[35].y, c[35];
+MAD   R0.xyz, vertex.attrib[2], R0.x, R2;
+ADD   R2.xyz, c[38], R0;
+BB4:
+BB5:
+BB6:
+MOVC  RC.x, c[21].w;
+MOV   R0.w, c[39].x;
+MOV   R0.xyz, R2;
+DP4   R1.x, R0, c[3];
+MUL   R1.y, R1.x, c[12].z;
+EX2   R1.y, R1.y;
+MAD   R1.z, R1.x, c[12].x, c[12].y;
+ADD   R1.z, R1, -R1.y;
+MAD   result.texcoord[2].w, R1.z, c[12], R1.y;
+MOV   result.position.w, R1.x;
+MUL   R1, vertex.attrib[3], c[14];
+DP4   result.position.z, R0, c[2];
+DP4   result.position.y, R0, c[1];
+DP4   result.position.x, R0, c[0];
+ADD   R1, c[15], R1;
+MOV   result.texcoord[2].xyz, c[13];
+BRA   BB14 (LE.x);
+BB7:
+MOVC  RC.x, c[21];
+BRA   BB9 (LE.x);
+BB8:
+DP3   R2.w, vertex.attrib[2], c[23];
+MAX   R2.w, R2, c[40].x;
+MUL   R3.xyz, R2.w, c[24];
+ADD_SAT R3.xyz, c[22], R3;
+ADD   R1.xyz, R1, R3;
+BB9:
+MOVC  RC.x, c[21].y;
+BRA   BB11 (LE.x);
+BB10:
+ADD   R3.xyz, c[40].yzww, -R2;
+DP3   R2.w, R3, R3;
+MAX   R2.w, R2, c[41].x;
+RSQ   R2.w, R2.w;
+MUL   R3.xyz, R2.w, R3;
+DP3   R2.w, vertex.attrib[2], R3;
+MUL   R4.xyz, R2.w, vertex.attrib[2];
+ADD   R5.xyz, c[25], -R2;
+DP3   R2.w, R5, R5;
+MAD   R3.xyz, R4, c[39].z, -R3;
+MAX   R2.w, R2, c[41].x;
+DP3   R3.x, R5, R3;
+RSQ   R2.w, R2.w;
+MUL   R2.w, R2, R3.x;
+MAX   R2.w, R2, c[40].x;
+MUL   R2.w, R2, R2;
+MUL   R2.w, R2, R2;
+MIN   R2.w, R2, c[39].x;
+ADD   R1.w, R1, R2;
+BB11:
+MOVC  RC.x, c[21].z;
+BRA   BB13 (LE.x);
+BB12:
+ADD   R3.xyz, -c[26], R2;
+DP3   R2.w, R3, R3;
+RSQ   R2.w, R2.w;
+RCP   R2.w, R2.w;
+MUL_SAT R2.w, R2, c[26];
+ADD   R1.w, R1, R2;
+BB13:
+BB14:
+MOV   R2.w, c[39].x;
+DP4C  HC.x, R2.w, c[16];
+MOV   result.color, R1;
+MOV   R3.zw, vertex.attrib[9].xyxy;
+MOV   R3.xy, vertex.attrib[8];
+MOV   R1, R3;
+BRA   BB20 (LE.x);
+BB15:
+MOVC  RC.x, c[16];
+BRA   BB17 (LE.x);
+BB16:
+ADD   R4.xyz, c[25], -R2;
+DP3   R1.z, R4, R4;
+MAX   R1.z, R1, c[41].x;
+RSQ   R1.z, R1.z;
+MUL   R4.xyz, R1.z, R4;
+DP3   R1.z, vertex.attrib[2], R4;
+MUL   R1.zw, R1.z, vertex.attrib[2].xyyz;
+MAD   R1.zw, R1, c[39].z, -R4.xyyz;
+MAD   R1.w, -R1, c[39].y, c[39].y;
+MAD   R1.z, R1, c[39].y, c[39].y;
+BB17:
+MOVC  RC.x, c[16].y;
+BRA   BB19 (LE.x);
+BB18:
+ADD   R2.xyz, c[25], -R2;
+DP3   R2.w, R2, R2;
+MAX   R2.w, R2, c[41].x;
+RSQ   R2.w, R2.w;
+MUL   R2.xyz, R2.w, R2;
+DP3   R2.x, vertex.attrib[2], R2;
+MUL   R3.zw, R2.x, vertex.attrib[2].xyyz;
+MAD   R2.xy, R3.zwzw, c[39].z, -R2.yzzw;
+MAD   R2.y, -R2, c[39], c[39];
+MAD   R2.x, R2, c[39].y, c[39].y;
+MOV   R3.zw, R2.xyxy;
+BB19:
+BB20:
+DP4   R2.x, R1, c[4];
+DP4   R2.y, R0, c[5];
+DP4   R1.x, R1, c[6];
+ADD   R2.x, R2, R2.y;
+DP4   R2.y, R0, c[7];
+DP4   R1.y, R0, c[9];
+ADD   R2.y, R1.x, R2;
+DP4   R1.x, R3, c[8];
+ADD   R2.z, R1.x, R1.y;
+MOVC  RC.x, c[16].z;
+DP4   R0.w, R0, c[11];
+DP4   R1.x, R3, c[10];
+ADD   R2.w, R1.x, R0;
+BRA   BB22 (LE.x);
+BB21:
+MOV   R1.y, R0;
+ADD   R1.x, R0, R0.z;
+MUL   R1.xy, R1, c[41].y;
+ADD   R1.xy, c[17].y, R1;
+MUL   R1.xy, R1, c[39].w;
+SIN   R1.y, R1.y;
+SIN   R1.x, R1.x;
+MUL   R1.xy, R1, c[17].x;
+MUL   R1, R1.xyxy, c[19];
+ADD   R1.xy, R1.xzzw, R1.ywzw;
+ADD   R2.xy, R2, R1;
+BB22:
+MOVC  RC.x, c[16].w;
+BRA   BB24 (LE.x);
+BB23:
+ADD   R0.x, R0, R0.z;
+MUL   R0.xy, R0, c[41].y;
+ADD   R0.xy, c[18].y, R0;
+MUL   R0.xy, R0, c[39].w;
+SIN   R0.y, R0.y;
+SIN   R0.x, R0.x;
+MUL   R0.xy, R0, c[18].x;
+MUL   R0, R0.xyxy, c[20];
+ADD   R0.xy, R0.xzzw, R0.ywzw;
+ADD   R2.zw, R2, R0.xyxy;
+BB24:
+MOV   result.texcoord[0].xy, R2;
+MOV   result.texcoord[1].xy, R2.zwzw;
+END
+# 204 instructions, 6 R-regs

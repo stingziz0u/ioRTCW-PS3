@@ -1,0 +1,2404 @@
+From 31c8ff6b5827f9c24e387b18329e1a541412c632 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 21:26:11 +0000
+Subject: [PATCH] ioRTCW-PS3 1.1: vertex work on the RSX (r_ps3_vprog)
+
+From IoQuake3-PS3's November 2026 "RSX changes" (Mayo1970), adapted to the
+iortcw renderer:
+
+- q3_vp_gen, a second vertex program (cgc from q3_vp_gen.vcg, kept as
+  NV40 assembly in shaders/asm), computes stage colors, texcoords (env,
+  vector, tcMods incl. RTCW's swap), model diffuse lighting and the
+  wave/bulge/move deforms on the RSX, with the same GL fog as q3_vp.
+- tr_ps3_vprog.c folds a stage into its uniforms in place of
+  ComputeColors/ComputeTexCoords/RB_CalcDiffuseColor/RB_DeformTessGeometry;
+  whatever the VP can't reproduce (normalzfade, firerise env, fading
+  models, fire-rise deforms, fog-adjusted colors, greyscale) stays on the
+  PPU as in 1.0.
+- ps3gl: per-draw uniforms uploaded only when they change, the stages of a
+  surface reuse the first stage's vertex copy and converted indices,
+  normals bound on ATTR2 when the VP needs them.
+- r_ps3_vprog 0 brings back 1.0's path; DIAG builds log the stage draws
+  that went to the RSX. Version 1.1, patch 20.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019SYMuiVSd8MmTqxYvUSCv5
+---
+ Makefile                            |   4 +-
+ PATCHLEVEL                          |   2 +-
+ README.md                           |  29 +-
+ code/gl/ps3gl.h                     |  35 ++
+ code/gl/ps3gl_draw.c                | 163 ++++++---
+ code/gl/ps3gl_main.c                |   2 +
+ code/gl/ps3gl_shader_data.h         | 400 ++++++++++++++++++++++
+ code/gl/ps3gl_shaders.c             | 148 +++++++-
+ code/gl/ps3gl_vertices.c            |  21 +-
+ code/gl/ps3gl_vprog.h               |  29 ++
+ code/gl/shaders/asm/q3_vp_gen.vpa   | 326 ++++++++++++++++++
+ code/gl/shaders/assemble_shaders.sh |  12 +-
+ code/gl/shaders/q3_vp_gen.vcg       | 139 ++++++++
+ code/renderer/ps3/tr_ps3_vprog.c    | 512 ++++++++++++++++++++++++++++
+ code/renderer/tr_backend.c          |   3 +
+ code/renderer/tr_init.c             |   4 +
+ code/renderer/tr_local.h            |   5 +
+ code/renderer/tr_shade.c            |  15 +-
+ code/sys/ps3_platform.h             |   2 +
+ code/sys/ps3_prof.c                 |   6 +
+ 20 files changed, 1790 insertions(+), 67 deletions(-)
+ create mode 100644 code/gl/ps3gl_vprog.h
+ create mode 100644 code/gl/shaders/asm/q3_vp_gen.vpa
+ create mode 100644 code/gl/shaders/q3_vp_gen.vcg
+ create mode 100644 code/renderer/ps3/tr_ps3_vprog.c
+
+diff --git a/Makefile b/Makefile
+index c1ef3d0..6c981e7 100644
+--- a/Makefile
++++ b/Makefile
+@@ -26,7 +26,7 @@ ifeq ($(strip $(PSL1GHT)),)
+   export PSL1GHT := $(PS3DEV)
+ endif
+ 
+-VERSION := 1.0
++VERSION := 1.1
+ STAGE   ?= 2
+ DEBUG   ?= 0
+ DIAG    ?= 0
+@@ -132,7 +132,7 @@ JPEG_SRCS := $(addprefix $(C)/jpeg-8c/, \
+ 
+ PS3_CLIENT_SRCS := \
+   $(C)/sys/ps3_glimp.c $(C)/input/ps3_input.c $(C)/input/ps3_osk.c $(C)/audio/ps3_snd.c \
+-  $(C)/renderer/ps3/qgl_ps3.c \
++  $(C)/renderer/ps3/qgl_ps3.c $(C)/renderer/ps3/tr_ps3_vprog.c \
+   $(addprefix $(C)/gl/, ps3gl_main.c ps3gl_states.c ps3gl_matrices.c ps3gl_vertices.c \
+     ps3gl_colors.c ps3gl_textures.c ps3gl_draw.c ps3gl_shaders.c)
+ 
+diff --git a/PATCHLEVEL b/PATCHLEVEL
+index d6b2404..209e3ef 100644
+--- a/PATCHLEVEL
++++ b/PATCHLEVEL
+@@ -1 +1 @@
+-19
++20
+diff --git a/README.md b/README.md
+index 44358ba..7535ed2 100644
+--- a/README.md
++++ b/README.md
+@@ -20,6 +20,25 @@ The upstream README (cvars, console commands) is still valid for anything
+ that isn't PS3 specific:
+ [iortcw/iortcw](https://github.com/iortcw/iortcw/blob/master/README.md).
+ 
++## What's new in 1.1
++
++From the November 2026 "RSX changes" of
++[IoQuake3-PS3](https://github.com/Mayo1970/IoQuake3-PS3) (Mayo1970), adapted
++to the iortcw renderer:
++
++- **Vertex work on the RSX** (`r_ps3_vprog 1`, the default). A new vertex
++  program (`q3_vp_gen`) computes each shader stage's colors, texture
++  coordinates (tcGen environment / vector, every tcMod but a second
++  turbulence) and the model lighting on the RSX, plus the wave / bulge /
++  move deforms, instead of a PPU loop over every vertex of every stage. The
++  later stages of a surface reuse the first stage's copy of the vertices
++  and its 16-bit indices. RTCW's own cases (alphaGen normalzfade, tcGen
++  firerise, fading models, fire-rise deforms) still run on the PPU, as
++  in 1.0. GL fog is drawn by both vertex programs.
++- `r_ps3_vprog 0` in the console goes back to 1.0's PPU path, from the next
++  frame, for comparing or if something draws wrong. `make DIAG=1` logs how
++  many stage draws went to the RSX (`[prof] r_ps3_vprog`).
++
+ ## Features
+ 
+ - **The whole single player campaign**: every mission and the six
+@@ -59,7 +78,7 @@ that isn't PS3 specific:
+ 
+ ## Installation
+ 
+-1. Install `iortcw-ps3-1.0.pkg` from the XMB (it shows up as "Return to
++1. Install `iortcw-ps3-1.1.pkg` from the XMB (it shows up as "Return to
+    Castle Wolfenstein"). This creates
+    `/dev_hdd0/game/IORTCWPS3/USRDIR/main/`, empty and ready to fill.
+ 2. By FTP, copy these files from your game's `Main` folder:
+@@ -100,7 +119,7 @@ the log says why, and a missing `.pk3` is the usual cause.
+    ```bash
+    git clone https://github.com/stingziz0u/ioRTCW-PS3.git
+    cd ioRTCW-PS3
+-   make -j4          # -> iortcw-ps3-1.0.pkg
++   make -j4          # -> iortcw-ps3-1.1.pkg
+    make verify       # shows the build stamp of the tree and of the PKG
+    ```
+ 
+@@ -109,7 +128,7 @@ Every variant builds in its own folder (`obj/<variant>`), so no
+ 
+ ```bash
+ make DIAG=1       # on-screen FPS, frame profile and load hitches in the log
+-                  #   -> iortcw-ps3-1.0-diag.pkg
++                  #   -> iortcw-ps3-1.1-diag.pkg
+ make MAPWALK=1    # loads and plays every map, logs memory and frame times, quits
+                   #   -> iortcw-ps3-mapwalk.pkg
+ make MAPWALK=1 WALKSECS=90   # the same, 90 s per map in god mode, cutscene
+@@ -125,7 +144,9 @@ single 64 KB TOC, no `r2off` stubs) and fails if a change breaks them.
+ The shaders are already assembled into `code/gl/ps3gl_shader_data.h`. They
+ are written in NV40 assembly (`code/gl/shaders/asm/`), so rebuilding them
+ with `code/gl/shaders/assemble_shaders.sh` only needs PSL1GHT's `cgcomp`,
+-not NVIDIA's Cg compiler.
++not NVIDIA's Cg compiler. The one exception is `asm/q3_vp_gen.vpa`, generated
++from `q3_vp_gen.vcg` with `cgc` (Ubuntu's `nvidia-cg-toolkit` package):
++only needed if you change the `.vcg`.
+ 
+ ## Controls
+ 
+diff --git a/code/gl/ps3gl.h b/code/gl/ps3gl.h
+index 1fadd84..bd27708 100644
+--- a/code/gl/ps3gl.h
++++ b/code/gl/ps3gl.h
+@@ -11,6 +11,7 @@
+ #include <rsx/gcm_sys.h>
+ 
+ #include "GL/gl.h"
++#include "ps3gl_vprog.h"
+ 
+ /* r_smp (ps3_glimp.c): ps3gl belongs to the render thread while it runs a
+  * batch. A call from any other stack meanwhile is a missing sync in the
+@@ -158,6 +159,27 @@ typedef struct {
+     uint32_t            fp_offset;
+ } ps3gl_shader_t;
+ 
++/* r_ps3_vprog 1's vertex program (q3_vp_gen, with fog); NULL vp if it failed to load.
++ * u[] follows ps3gl_shaders.c's vp_uniforms[] table. */
++typedef struct {
++    rsxVertexProgram   *vp;
++    void               *ucode;
++    uint32_t            ucode_size;
++    rsxProgramConst    *mvp;
++    rsxProgramConst    *fog_params, *fog_color;
++    rsxProgramConst    *u[PS3GL_VP_UNIFORMS];
++} ps3gl_vpgen_t;
++
++/* The last vring copy of a q3_vp_gen draw: every stage of a surface reads the same raw tess arrays,
++ * so a later stage in the same glLockArraysEXT reuses it instead of copying again. */
++typedef struct {
++    int                 valid;
++    uint32_t            serial;
++    const void         *vp, *tp0, *tp1, *cp, *np;
++    int                 vs, vsize, ts, num_verts;
++    uint32_t            offset, n_offset;
++} ps3gl_vcopy_t;
++
+ /* Global GL state */
+ typedef struct {
+     gcmContextData     *ctx;
+@@ -232,6 +254,8 @@ typedef struct {
+     int                 va_locked;
+     GLint               va_lock_first;
+     GLsizei             va_lock_count;
++    uint32_t            va_lock_serial;    /* bumped per glLockArraysEXT: tess is one global, equal pointers prove nothing */
++    ps3gl_vcopy_t       vcopy;
+ 
+     ps3gl_vring_t       vring;
+ 
+@@ -254,6 +278,15 @@ typedef struct {
+     int                 active_shader;
+     rsxVertexProgram   *active_vp;      /* physical VP currently loaded on RSX; all shader slots share one VP, so this is tracked separately from active_shader (the FP key) */
+     uint32_t            mvp_uploaded_gen; /* last ps3gl_get_mvp_generation() value uploaded to active_vp */
++    rsxVertexProgram   *loaded_vp;      /* last VP really loaded; active_vp is cleared every frame */
++
++    /* r_ps3_vprog: vp_next is the pending one-shot draw, vp_up the q3_vp_gen uniforms the RSX holds */
++    int                 vprog;
++    ps3gl_vpgen_t       vpgen;
++    int                 vp_pending;
++    ps3gl_vparams_t     vp_next;
++    int                 vp_up_valid;
++    ps3gl_vparams_t     vp_up;          /* only the uniform floats are used */
+ 
+ } ps3gl_state_t;
+ 
+@@ -289,9 +322,11 @@ void ps3gl_apply_states(void);
+ void ps3gl_apply_matrices(void);
+ void ps3gl_apply_textures(void);
+ void ps3gl_apply_shader(void);
++void ps3gl_apply_vparams(const ps3gl_vparams_t *p);   /* after ps3gl_apply_shader; NULL = identity */
+ 
+ /* Vertex ring buffer */
+ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset);
++void *ps3gl_vring_alloc_bytes(uint32_t bytes, uint32_t *out_offset);
+ 
+ /* Texture helpers */
+ ps3gl_texture_t *ps3gl_texture_find(GLuint name);
+diff --git a/code/gl/ps3gl_draw.c b/code/gl/ps3gl_draw.c
+index 8b0dd29..8e8853e 100644
+--- a/code/gl/ps3gl_draw.c
++++ b/code/gl/ps3gl_draw.c
+@@ -74,6 +74,7 @@ void ps3gl_LockArraysEXT(GLint first, GLsizei count)
+     ps3gl.va_locked     = 1;
+     ps3gl.va_lock_first = first;
+     ps3gl.va_lock_count = count;
++    ps3gl.va_lock_serial++;
+ }
+ 
+ void ps3gl_UnlockArraysEXT(void)
+@@ -130,6 +131,13 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
+ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+                                 const void *indices)
+ {
++    /* r_ps3_vprog 1: the parameters belong to this draw only, even if it drops out below */
++    const ps3gl_vparams_t *vpp = NULL;
++    if (ps3gl.vp_pending) {
++        ps3gl.vp_pending = 0;
++        vpp = &ps3gl.vp_next;
++    }
++
+     if (count <= 0) return;
+     if (!ps3gl.va_vertex.ptr) return;
+     ps3gl_inc_draw_count();
+@@ -142,6 +150,15 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+     ps3gl_apply_textures();
+     ps3gl_apply_shader();
+ 
++    /* q3_vp_gen bound (r_ps3_vprog 1): every draw goes through it, the stage ones with their own
++     * parameters, the others (2D, dlights, fog pass, immediate mode) with the identity ones. */
++    const int gen = ps3gl.vpgen.vp && ps3gl.active_vp == ps3gl.vpgen.vp;
++    if (!gen)
++        vpp = NULL;
++    ps3gl_apply_vparams(vpp);
++    if (vpp)
++        ps3gl_stats.vprog_draws++;
++
+     gcmContextData *ctx = ps3gl_get_ctx();
+     if (!ctx) return;
+ 
+@@ -184,6 +201,15 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+     int cs = ps3gl.va_color.stride;
+     if (cs == 0) cs = 4;
+ 
++    /* q3_vp_gen: the raw tess arrays replace the svars ones the renderer bound; the VP does the math */
++    if (vpp) {
++        tp0 = (const uint8_t *)vpp->st;
++        tp1 = (const uint8_t *)vpp->lm;
++        ts0 = ts1 = vpp->tc_stride;
++        cp  = (const uint8_t *)vpp->color;
++        cs  = 4;
++    }
++
+     const int has_z = (ps3gl.va_vertex.size >= 3);
+ 
+     /* Direct-bind XDR arrays to RSX, or copy to vring on failure. */
+@@ -193,7 +219,8 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+         uint32_t off_tc1  = 0;
+         uint32_t off_col  = 0;
+ 
+-        int direct =
++        /* (q3_vp_gen also reads ATTR2, which only the ring path binds) */
++        int direct = !gen &&
+             ps3gl_io_mapped(vp, (size_t)num_verts * vs) &&
+             (!tp0 || ps3gl_io_mapped(tp0, (size_t)num_verts * ts0)) &&
+             (!tp1 || ps3gl_io_mapped(tp1, (size_t)num_verts * ts1)) &&
+@@ -226,48 +253,79 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+                                          GCM_VERTEX_DATA_TYPE_U8,
+                                          GCM_LOCATION_CELL);
+         } else {
+-            /* Fallback: interleave-copy into RSX ring buffer. */
++            /* Fallback: interleave-copy into RSX ring buffer. r_ps3_vprog: every stage of a surface reads
++             * the same raw arrays, so a later stage in the same lock reuses the copy; it sits in this
++             * frame's ring segment, under its fence. */
+             unsigned long long tc0 = PS3_ProfTick();
+-            uint32_t vb_offset;
+-            ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
+-            if (!verts) return;
+-
+-            const uint32_t imm_c = ps3gl.imm.color;
+-
+-            if (tp0 && tp1 && cp) {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp  + i * vs);
+-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+-                    const float   *tc1 = (const float *)(tp1 + i * ts1);
+-                    const uint8_t *c   = cp + i * cs;
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    v->u0 = tc0[0]; v->v0 = tc0[1];
+-                    v->u1 = tc1[0]; v->v1 = tc1[1];
+-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
++            uint32_t vb_offset, n_offset = 0;
++            ps3gl_vcopy_t *vc = &ps3gl.vcopy;
++            const int v1_locked = vpp && ps3gl.va_locked;
++            const void *np = vpp ? vpp->normal : NULL;
++
++            if (v1_locked && vc->valid && vc->serial == ps3gl.va_lock_serial &&
++                vc->vp == vp && vc->vs == vs && vc->vsize == ps3gl.va_vertex.size &&
++                vc->tp0 == tp0 && vc->tp1 == tp1 && vc->cp == cp && vc->ts == ts0 &&
++                (vc->np == np || !np) && vc->num_verts == num_verts) {
++                vb_offset = vc->offset;
++                n_offset = vc->n_offset;
++                ps3gl_stats.vcopy_reused++;
++            } else {
++                ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
++                if (!verts) return;
++
++                const uint32_t imm_c = ps3gl.imm.color;
++
++                if (tp0 && tp1 && cp) {
++                    for (int i = 0; i < num_verts; i++) {
++                        const float   *pos = (const float *)(vp  + i * vs);
++                        const float   *tc0 = (const float *)(tp0 + i * ts0);
++                        const float   *tc1 = (const float *)(tp1 + i * ts1);
++                        const uint8_t *c   = cp + i * cs;
++                        ps3gl_vertex_t *v  = &verts[i];
++                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
++                        v->u0 = tc0[0]; v->v0 = tc0[1];
++                        v->u1 = tc1[0]; v->v1 = tc1[1];
++                        v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
++                    }
++                } else if (tp0 && cp) {
++                    for (int i = 0; i < num_verts; i++) {
++                        const float   *pos = (const float *)(vp  + i * vs);
++                        const float   *tc0 = (const float *)(tp0 + i * ts0);
++                        const uint8_t *c   = cp + i * cs;
++                        ps3gl_vertex_t *v  = &verts[i];
++                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
++                        v->u0 = tc0[0]; v->v0 = tc0[1];
++                        v->u1 = 0.0f;  v->v1 = 0.0f;
++                        v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
++                    }
++                } else {
++                    for (int i = 0; i < num_verts; i++) {
++                        const float   *pos = (const float *)(vp + i * vs);
++                        ps3gl_vertex_t *v  = &verts[i];
++                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
++                        if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
++                        else     { v->u0 = 0.0f; v->v0 = 0.0f; }
++                        if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
++                        else     { v->u1 = 0.0f; v->v1 = 0.0f; }
++                        if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
++                        else     { v->color = imm_c; }
++                    }
+                 }
+-            } else if (tp0 && cp) {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp  + i * vs);
+-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+-                    const uint8_t *c   = cp + i * cs;
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    v->u0 = tc0[0]; v->v0 = tc0[1];
+-                    v->u1 = 0.0f;  v->v1 = 0.0f;
+-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
++
++                /* tess.normal (vec4, stride 16) as its own 16-byte aligned carve, one sequential pass */
++                if (np) {
++                    void *nd = ps3gl_vring_alloc_bytes((uint32_t)num_verts * 16, &n_offset);
++                    if (!nd) return;
++                    memcpy(nd, np, (size_t)num_verts * 16);
+                 }
+-            } else {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp + i * vs);
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
+-                    else     { v->u0 = 0.0f; v->v0 = 0.0f; }
+-                    if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
+-                    else     { v->u1 = 0.0f; v->v1 = 0.0f; }
+-                    if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
+-                    else     { v->color = imm_c; }
++                if (v1_locked) {
++                    vc->valid = 1;
++                    vc->serial = ps3gl.va_lock_serial;
++                    vc->vp = vp;   vc->vs = vs;   vc->vsize = ps3gl.va_vertex.size;
++                    vc->tp0 = tp0; vc->tp1 = tp1; vc->cp = cp; vc->ts = ts0; vc->np = np;
++                    vc->num_verts = num_verts;
++                    vc->offset = vb_offset;
++                    vc->n_offset = n_offset;
+                 }
+             }
+ 
+@@ -293,6 +351,13 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+                                      PS3GL_VERTEX_SIZE, 4,
+                                      GCM_VERTEX_DATA_TYPE_U8,
+                                      ps3gl.vring.location);
++            /* q3_vp_gen fetches ATTR2 on every draw; without normals it reads the positions, unused */
++            if (gen)
++                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_NORMAL, 0,
++                                         np ? n_offset : vb_offset + PS3GL_VATTR_POS_OFF,
++                                         np ? 16 : PS3GL_VERTEX_SIZE, 3,
++                                         GCM_VERTEX_DATA_TYPE_F32,
++                                         ps3gl.vring.location);
+         }
+     }
+ 
+@@ -312,8 +377,17 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+     }
+     int n = (count > 65536) ? 65536 : count;
+ 
++    /* idx16 still holds this index list: every stage of a surface draws tess.indexes again in the same
++     * lock (iortcw's 32-bit indices are converted once). Only r_ps3_vprog stage draws (vpp) use it:
++     * the dlight pass reuses one stack array with new contents in the same lock. */
++    static const void *idx_src;
++    static uint32_t idx_serial;
++    static int idx_n;
++    static GLenum idx_type;
++
+     /* Software clip plane: cull triangles where all 3 verts are behind plane. */
+     if (ps3gl.clip_plane_enabled && n >= 3 && mode == GL_TRIANGLES) {
++        idx_src = NULL;
+         float nx   = ps3gl.clip_plane[0];
+         float ny   = ps3gl.clip_plane[1];
+         float nz   = ps3gl.clip_plane[2];
+@@ -344,11 +418,18 @@ static void ps3gl_DrawElements_(GLenum mode, GLsizei count, GLenum type,
+     }
+ 
+     /* RSX inline indices are 16-bit: convert (or copy) whatever GL sent. */
+-    if (type == GL_UNSIGNED_SHORT) {
++    if (vpp && ps3gl.va_locked && indices == idx_src && n == idx_n && type == idx_type &&
++        ps3gl.va_lock_serial == idx_serial) {
++        /* same list, same lock: idx16 is already right */
++    } else if (type == GL_UNSIGNED_SHORT) {
+         memcpy(idx16, indices, n * sizeof(uint16_t));
+     } else {
+         for (int i = 0; i < n; i++)
+             idx16[i] = (uint16_t)ps3gl_index_at(indices, type, i);
+     }
++    idx_src = (vpp && ps3gl.va_locked) ? indices : NULL;
++    idx_n = n;
++    idx_type = type;
++    idx_serial = ps3gl.va_lock_serial;
+     rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
+ }
+diff --git a/code/gl/ps3gl_main.c b/code/gl/ps3gl_main.c
+index fd9970f..b20147b 100644
+--- a/code/gl/ps3gl_main.c
++++ b/code/gl/ps3gl_main.c
+@@ -188,6 +188,8 @@ void ps3gl_begin_frame(void)
+     }
+ 
+     ps3gl.vring.head = 0;
++    ps3gl.vcopy.valid = 0;     /* r_ps3_vprog: last frame's copy lives in the other segment */
++    ps3gl.vp_pending = 0;
+ 
+     ps3gl.dirty     = PS3GL_DIRTY_ALL;
+     ps3gl.mv.dirty  = 1;
+diff --git a/code/gl/ps3gl_shader_data.h b/code/gl/ps3gl_shader_data.h
+index a82db08..273e09a 100644
+--- a/code/gl/ps3gl_shader_data.h
++++ b/code/gl/ps3gl_shader_data.h
+@@ -5,6 +5,7 @@
+ 
+ #define PS3GL_SHADERS_AVAILABLE 1
+ #define PS3GL_SHADERS_FOG 1
++#define PS3GL_SHADERS_VPGEN 1
+ 
+ static const unsigned char shader_vp_data[] __attribute__((aligned(16))) = {
+   0x56, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x06, 0x00, 0x0e,
+@@ -337,4 +338,403 @@ static const unsigned char shader_fp_modulate2_fog_data[] __attribute__((aligned
+ };
+ static const unsigned int shader_fp_modulate2_fog_data_size = 256;
+ 
++static const unsigned char shader_vp_gen_data[] __attribute__((aligned(16))) = {
++  0x56, 0x50, 0x00, 0x00, 0x00, 0x06, 0x00, 0x05, 0x00, 0x2a, 0x00, 0xcc,
++  0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x05, 0xc0,
++  0x00, 0x00, 0x03, 0x0d, 0x00, 0x01, 0xc0, 0x05, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x04, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x02, 0x08, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x03, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x0e, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x11, 0x00, 0x00, 0x00, 0x09, 0x07, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x14, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x04, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x05, 0x18, 0x00, 0x00, 0x00, 0x0c,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x22,
++  0x00, 0x00, 0x00, 0x0d, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x2b, 0x00, 0x00, 0x00, 0x0e, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x30, 0x00, 0x00, 0x00, 0x0f,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x35,
++  0x00, 0x00, 0x00, 0x04, 0x0b, 0x00, 0x04, 0x00, 0x3f, 0x80, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x39, 0x00, 0x00, 0x00, 0x08, 0x0b, 0x00, 0x04, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x05, 0x3d, 0x00, 0x00, 0x00, 0x10,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x42,
++  0x00, 0x00, 0x00, 0x11, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x48, 0x00, 0x00, 0x00, 0x12, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x4e, 0x00, 0x00, 0x00, 0x13,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x55,
++  0x00, 0x00, 0x00, 0x14, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x5c, 0x00, 0x00, 0x00, 0x15, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x61, 0x00, 0x00, 0x00, 0x16,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x66,
++  0x00, 0x00, 0x00, 0x17, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x6b, 0x00, 0x00, 0x00, 0x18, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x71, 0x00, 0x00, 0x00, 0x19,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x76,
++  0x00, 0x00, 0x00, 0x1a, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x7b, 0x00, 0x00, 0x00, 0x1b, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x80, 0x00, 0x00, 0x00, 0x1c,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x85,
++  0x00, 0x00, 0x00, 0x1d, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x8a, 0x00, 0x00, 0x00, 0x1e, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x8f, 0x00, 0x00, 0x00, 0x1f,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x94,
++  0x00, 0x00, 0x00, 0x20, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0x99, 0x00, 0x00, 0x00, 0x21, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x9e, 0x00, 0x00, 0x00, 0x22,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xa3,
++  0x00, 0x00, 0x00, 0x23, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x05, 0xa8, 0x00, 0x00, 0x00, 0x24, 0x09, 0x00, 0x01, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xad, 0x00, 0x00, 0x00, 0x25,
++  0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xb2,
++  0x00, 0x00, 0x00, 0x26, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x27, 0x09, 0x01, 0x01, 0x00,
++  0x3f, 0x80, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
++  0x40, 0xc9, 0x0f, 0xdb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28,
++  0x09, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc4, 0x70, 0x00, 0x00,
++  0x44, 0xf7, 0x80, 0x00, 0x42, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x29, 0x09, 0x01, 0x01, 0x00, 0x1e, 0x3c, 0xe5, 0x08,
++  0x3a, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x70, 0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x6e, 0x6f, 0x72,
++  0x6d, 0x61, 0x6c, 0x00, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x73, 0x74,
++  0x00, 0x6c, 0x6d, 0x00, 0x6d, 0x76, 0x70, 0x00, 0x66, 0x6f, 0x67, 0x50,
++  0x61, 0x72, 0x61, 0x6d, 0x73, 0x00, 0x66, 0x6f, 0x67, 0x43, 0x6f, 0x6c,
++  0x6f, 0x72, 0x00, 0x63, 0x6d, 0x75, 0x6c, 0x00, 0x63, 0x61, 0x64, 0x64,
++  0x00, 0x74, 0x6d, 0x30, 0x00, 0x74, 0x6d, 0x31, 0x00, 0x74, 0x73, 0x65,
++  0x6c, 0x00, 0x74, 0x75, 0x72, 0x62, 0x30, 0x00, 0x74, 0x75, 0x72, 0x62,
++  0x31, 0x00, 0x74, 0x75, 0x72, 0x62, 0x6d, 0x30, 0x00, 0x74, 0x75, 0x72,
++  0x62, 0x6d, 0x31, 0x00, 0x63, 0x73, 0x65, 0x6c, 0x00, 0x6c, 0x61, 0x6d,
++  0x62, 0x00, 0x6c, 0x64, 0x69, 0x72, 0x00, 0x6c, 0x64, 0x69, 0x72, 0x63,
++  0x00, 0x76, 0x6f, 0x72, 0x67, 0x00, 0x70, 0x6f, 0x72, 0x67, 0x00, 0x64,
++  0x66, 0x61, 0x30, 0x00, 0x64, 0x66, 0x62, 0x30, 0x00, 0x64, 0x66, 0x63,
++  0x30, 0x00, 0x64, 0x66, 0x6d, 0x30, 0x00, 0x64, 0x66, 0x61, 0x31, 0x00,
++  0x64, 0x66, 0x62, 0x31, 0x00, 0x64, 0x66, 0x63, 0x31, 0x00, 0x64, 0x66,
++  0x6d, 0x31, 0x00, 0x64, 0x66, 0x61, 0x32, 0x00, 0x64, 0x66, 0x62, 0x32,
++  0x00, 0x64, 0x66, 0x63, 0x32, 0x00, 0x64, 0x66, 0x6d, 0x32, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x1f, 0xdc, 0x6c,
++  0x00, 0x41, 0xd0, 0x55, 0x01, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0x40, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x41, 0xdf, 0xfc, 0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x8a, 0x00, 0x5e, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8a, 0xa0, 0x41, 0x1f, 0xfc,
++  0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x42, 0x10, 0x55, 0x01, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0x81, 0xb8, 0x00,
++  0x01, 0x3f, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x55, 0x01, 0x06, 0xc0, 0x83, 0x60, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xb0, 0x0d, 0x80, 0xaa, 0x80, 0xca,
++  0xa0, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc1, 0xc0, 0x00,
++  0x01, 0x86, 0xc0, 0x80, 0x00, 0x20, 0x3f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x03, 0x80, 0x00, 0x7f, 0x80, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x82, 0x70, 0x00, 0x00, 0xaa, 0x80, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x03, 0x80, 0x00, 0x0d,
++  0x80, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x70, 0x2a, 0x80, 0x86, 0xc0, 0xe0, 0x00, 0x60, 0x5f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x03, 0x02, 0x70, 0x00, 0x00, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x70, 0x8d,
++  0x80, 0xaa, 0x80, 0xc0, 0x00, 0x60, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x82, 0x70, 0x0d, 0x80, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x80, 0x1c, 0x6c, 0x00, 0xc2, 0x70, 0x00, 0x01, 0x86, 0xc0, 0xa3,
++  0x60, 0x20, 0x5f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x00, 0x81, 0xc0, 0x2a,
++  0x80, 0xaa, 0x80, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0x9c, 0x6c,
++  0x78, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f, 0xe0, 0x22, 0x00, 0x7c,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d, 0x80, 0xaa, 0x80, 0x43,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xc0, 0x0d,
++  0x80, 0x95, 0x40, 0xc0, 0x00, 0xa0, 0x3f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x01, 0xc0, 0x0d, 0x80, 0xbf, 0xc0, 0xdf, 0xe0, 0x20, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xd0, 0x00, 0x00, 0x80, 0x00, 0xc3,
++  0x60, 0x20, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc2, 0x70, 0x0d,
++  0x81, 0x86, 0xc0, 0xa3, 0x60, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x01, 0xd0, 0x0d, 0x80, 0x95, 0x40, 0xca, 0xa0, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xb0, 0x0d, 0x80, 0x95, 0x40, 0xc3,
++  0x60, 0x61, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0x80, 0x02, 0x0d,
++  0x81, 0x00, 0x00, 0x43, 0x60, 0x41, 0xdf, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x80, 0x86, 0xc0, 0x83, 0x60, 0x41, 0xdf, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0xc1, 0xe0, 0x0d, 0x81, 0x86, 0xc0, 0x83,
++  0x60, 0x21, 0xdf, 0xfc, 0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x8a, 0x00, 0x5e, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x8a, 0xa1, 0x21, 0x1f, 0xfc,
++  0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x42, 0x50, 0x55, 0x01, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0x81, 0xf8, 0x00,
++  0x01, 0x3f, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x55, 0x04, 0x86, 0xc0, 0x83, 0x60, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xf0, 0x0d, 0x80, 0xaa, 0x80, 0xca,
++  0xa0, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc2, 0x00, 0x00,
++  0x01, 0x86, 0xc0, 0x80, 0x00, 0x20, 0x3f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x03, 0x80, 0x00, 0x7f, 0x80, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x82, 0x70, 0x00, 0x00, 0xaa, 0x80, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x03, 0x80, 0x00, 0x0d,
++  0x80, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x70, 0x2a, 0x80, 0x86, 0xc0, 0xe0, 0x00, 0x60, 0x5f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x03, 0x02, 0x70, 0x00, 0x00, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x70, 0x8d,
++  0x80, 0xaa, 0x80, 0xc0, 0x00, 0x60, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x82, 0x70, 0x0d, 0x80, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x80, 0x1c, 0x6c, 0x00, 0xc2, 0x70, 0x00, 0x01, 0x86, 0xc0, 0xa3,
++  0x60, 0x20, 0x5f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x00, 0x82, 0x00, 0x2a,
++  0x80, 0xaa, 0x80, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0x9c, 0x6c,
++  0x78, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f, 0xe0, 0x22, 0x00, 0x7c,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d, 0x80, 0xaa, 0x80, 0x43,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x00, 0x0d,
++  0x80, 0x95, 0x40, 0xc0, 0x00, 0xa0, 0x3f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x00, 0x0d, 0x80, 0xbf, 0xc0, 0xdf, 0xe0, 0x20, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x10, 0x00, 0x00, 0x80, 0x00, 0xc3,
++  0x60, 0x20, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc2, 0x70, 0x0d,
++  0x81, 0x86, 0xc0, 0xa3, 0x60, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x10, 0x0d, 0x80, 0x95, 0x40, 0xca, 0xa0, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x01, 0xf0, 0x0d, 0x80, 0x95, 0x40, 0xc3,
++  0x60, 0x61, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x00, 0x02, 0x0d,
++  0x81, 0x00, 0x00, 0x43, 0x61, 0x21, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc2, 0x20, 0x0d, 0x81, 0x86, 0xc0, 0x83, 0x60, 0x21, 0xdf, 0xfc,
++  0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8a,
++  0x00, 0x5e, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc0, 0x00, 0x0d,
++  0x84, 0x86, 0xc0, 0x8a, 0xa1, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x82, 0x38, 0x00, 0x01, 0x3f, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc0, 0x00, 0x55, 0x04, 0x86, 0xc0, 0x83,
++  0x60, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x30, 0x0d,
++  0x80, 0xaa, 0x80, 0xca, 0xa0, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc2, 0x40, 0x00, 0x01, 0x86, 0xc0, 0x80, 0x00, 0x20, 0x3f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x03, 0x80, 0x00, 0x7f, 0x80, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0x82, 0x70, 0x00,
++  0x00, 0xaa, 0x80, 0xc3, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x03, 0x80, 0x00, 0x0d, 0x80, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x70, 0x2a, 0x80, 0x86, 0xc0, 0xe0,
++  0x00, 0x60, 0x5f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x03, 0x02, 0x70, 0x00,
++  0x00, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x70, 0x8d, 0x80, 0xaa, 0x80, 0xc0, 0x00, 0x60, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x82, 0x70, 0x0d, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x3f, 0xfc, 0x00, 0x80, 0x1c, 0x6c, 0x00, 0xc2, 0x70, 0x00,
++  0x01, 0x86, 0xc0, 0xa3, 0x60, 0x20, 0x5f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x82, 0x40, 0x2a, 0x80, 0xaa, 0x80, 0xc3, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x78, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f,
++  0xe0, 0x22, 0x00, 0x7c, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d,
++  0x80, 0xaa, 0x80, 0x43, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x02, 0x40, 0x0d, 0x80, 0x95, 0x40, 0xc0, 0x00, 0xa0, 0x3f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x40, 0x0d, 0x80, 0xbf, 0xc0, 0xdf,
++  0xe0, 0x20, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x50, 0x00,
++  0x00, 0x80, 0x00, 0xc3, 0x60, 0x20, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc2, 0x70, 0x0d, 0x81, 0x86, 0xc0, 0xa3, 0x60, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x50, 0x0d, 0x80, 0x95, 0x40, 0xca,
++  0xa0, 0x21, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x01, 0x02, 0x30, 0x0d,
++  0x80, 0x95, 0x40, 0xc3, 0x60, 0x61, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x01, 0x00, 0x02, 0x0d, 0x81, 0x00, 0x00, 0x43, 0x61, 0x21, 0xdf, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0xc2, 0x60, 0x0d, 0x81, 0x86, 0xc0, 0x83,
++  0x60, 0x21, 0xdf, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x50, 0x7f,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x42, 0x70, 0x00, 0x01, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x40, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0xdf, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0xc0, 0x30, 0x0d,
++  0x80, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x80, 0xc0, 0x00, 0x02, 0xaa, 0x80, 0xc3, 0x60, 0x40, 0x9f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x70, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8a,
++  0xa0, 0xa8, 0x00, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0x00, 0xc0, 0x00,
++  0x02, 0x80, 0x00, 0xca, 0xa0, 0x60, 0x5f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x82, 0x86, 0xc0, 0xaa, 0xa0, 0xa0, 0x5f, 0xfc,
++  0x40, 0x1f, 0x9c, 0x6c, 0x01, 0x00, 0xc0, 0x55, 0x02, 0x86, 0xc0, 0xca,
++  0xa0, 0xa0, 0x3f, 0xa4, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x00,
++  0x02, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x3f, 0x80, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x80, 0xe3, 0x0d, 0x81, 0x06, 0xc0, 0xc3, 0x60, 0x41, 0xff, 0xfc,
++  0x40, 0x1f, 0x9c, 0x6c, 0x01, 0xc0, 0x20, 0x0d, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x5f, 0x80, 0x40, 0x1f, 0x9c, 0x6c, 0x01, 0xc0, 0x10, 0x0d,
++  0x80, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0x80, 0x40, 0x1f, 0x9c, 0x6c,
++  0x01, 0xc0, 0x00, 0x0d, 0x80, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0x80,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0xc0, 0xf0, 0x0d, 0x81, 0x86, 0xc0, 0x83,
++  0x60, 0xa1, 0xff, 0xfc, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0xd0, 0x0d,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x41, 0xdf, 0xa4, 0x00, 0x1f, 0xac, 0x00,
++  0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x90, 0xa0, 0x5e, 0x1f, 0xfc,
++  0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x50, 0x0d, 0x81, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x8d, 0x00, 0x5e, 0x1f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0x41, 0x72, 0x0d, 0x81, 0x06, 0xc0, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x02, 0x82, 0x80, 0x0d, 0x84, 0x80, 0x00, 0xc3,
++  0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x9c, 0x6c, 0x00, 0x81, 0x80, 0x7f,
++  0x84, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0xdf, 0xfc, 0x04, 0x01, 0x9c, 0x6c,
++  0x00, 0xc1, 0x60, 0x0d, 0x81, 0x86, 0xc0, 0x83, 0x61, 0xa1, 0xdf, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0xc0, 0x00, 0x0d, 0x82, 0x86, 0xc0, 0x83,
++  0x61, 0xa1, 0xdf, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x50, 0x2a,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00,
++  0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8f, 0xa0, 0x5e, 0x1f, 0xfc,
++  0x00, 0x01, 0x9c, 0x6c, 0x00, 0xc2, 0x80, 0x37, 0x81, 0x86, 0xc0, 0xa3,
++  0x61, 0x21, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x01, 0x40, 0x00, 0x0d,
++  0x86, 0x86, 0xc3, 0x43, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x02, 0x82, 0x90, 0x0d, 0x84, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x20, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f,
++  0xe1, 0x22, 0x01, 0x7c, 0x00, 0x01, 0x9c, 0x6c, 0x00, 0x80, 0x00, 0x7f,
++  0x84, 0x86, 0xc3, 0x43, 0x60, 0x41, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0x40, 0x02, 0x0d, 0x81, 0x06, 0xc3, 0x43, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x02, 0x1c, 0x6c, 0x00, 0x80, 0x02, 0x7f, 0x84, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0xdf, 0xfc, 0x00, 0x02, 0x9c, 0x6c, 0x00, 0xc1, 0x90, 0x0d,
++  0x81, 0x86, 0xc0, 0xa3, 0x61, 0x21, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0x40, 0x00, 0x0d, 0x8a, 0x86, 0xc5, 0x43, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x01, 0x9c, 0x6c, 0x01, 0x02, 0x70, 0x0d, 0x88, 0xaa, 0x80, 0xe3,
++  0x61, 0xa1, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x02, 0x82, 0x90, 0x0d,
++  0x84, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x9c, 0x6c,
++  0x01, 0x40, 0x00, 0x0d, 0x8a, 0x86, 0xc3, 0x43, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x20, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f,
++  0xe1, 0x22, 0x01, 0x7c, 0x00, 0x01, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d,
++  0x84, 0x80, 0x03, 0x43, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x02, 0x82, 0x80, 0x0d, 0x84, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d, 0x84, 0x86, 0xc2, 0x43,
++  0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x0d,
++  0x84, 0x86, 0xc2, 0x43, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x02, 0x42, 0x70, 0x0d, 0x84, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0xc0, 0x00, 0x0d, 0x82, 0x86, 0xc0, 0x83,
++  0x61, 0x20, 0x3f, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x50, 0x55,
++  0x01, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00,
++  0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x90, 0xa0, 0x5e, 0x1f, 0xfc,
++  0x00, 0x01, 0x9c, 0x6c, 0x00, 0xc1, 0xa0, 0x8d, 0x81, 0x86, 0xc0, 0x83,
++  0x61, 0x21, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x01, 0x40, 0x00, 0x0d,
++  0x86, 0x86, 0xc3, 0x43, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x1f, 0x9c, 0x6c,
++  0x20, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f, 0xe1, 0x22, 0x01, 0x7c,
++  0x00, 0x1f, 0x9c, 0x6c, 0x10, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f,
++  0xe1, 0x22, 0x01, 0x7c, 0x04, 0x01, 0x1c, 0x6c, 0x00, 0x81, 0xa0, 0x0d,
++  0x84, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x82, 0x86, 0xc0, 0x83, 0x61, 0x20, 0x3f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0x42, 0x70, 0x00, 0x01, 0x86, 0xc0, 0x83,
++  0x60, 0x40, 0x3f, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x01, 0xc1, 0x00, 0x7f,
++  0x84, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x40, 0x1f, 0x9c, 0x6c,
++  0x00, 0x40, 0x00, 0x0d, 0x82, 0x86, 0xc0, 0x83, 0x60, 0x41, 0xff, 0x84,
++  0x00, 0x01, 0x9c, 0x6c, 0x00, 0x40, 0x09, 0x08, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x40, 0x7f, 0xfc, 0x00, 0x01, 0x9c, 0x6c, 0x00, 0x40, 0x08, 0x0d,
++  0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x40, 0x00, 0x0d, 0x86, 0x86, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xfc,
++  0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x94,
++  0xa0, 0x5e, 0x1f, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x00, 0x0d,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00,
++  0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x93, 0x00, 0x5e, 0x1f, 0xfc,
++  0x00, 0x02, 0x1c, 0x6c, 0x00, 0xc1, 0x90, 0x0d, 0x81, 0x86, 0xc0, 0xa3,
++  0x61, 0x21, 0xdf, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0x40, 0x00, 0x0d,
++  0x88, 0x86, 0xc4, 0x43, 0x60, 0x40, 0x5f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x02, 0x82, 0x90, 0x0d, 0x82, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x5f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x20, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x95,
++  0x40, 0xa4, 0x00, 0xfc, 0x00, 0x02, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x55,
++  0x02, 0x86, 0xc4, 0x43, 0x60, 0x41, 0xdf, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x01, 0x40, 0x02, 0x0d, 0x81, 0x06, 0xc4, 0x43, 0x60, 0x40, 0x5f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0x80, 0x02, 0x55, 0x02, 0x85, 0x80, 0x83,
++  0x60, 0x40, 0x7f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0x02, 0x70, 0x0d,
++  0x82, 0xaa, 0x80, 0xe2, 0xc2, 0x20, 0x7f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x01, 0x02, 0x70, 0x8d, 0x82, 0x95, 0x40, 0xca, 0xa0, 0x60, 0x3f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x01, 0x02, 0x70, 0x0d, 0x82, 0x95, 0x40, 0xca,
++  0xa0, 0x60, 0x5f, 0xfc, 0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x00, 0x2a,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00,
++  0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x94, 0xa0, 0x5e, 0x1f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x00, 0xc1, 0x90, 0x0d, 0x81, 0x86, 0xc0, 0xa3,
++  0x61, 0x21, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x01, 0x40, 0x00, 0x0d,
++  0x84, 0x86, 0xc2, 0x43, 0x60, 0x40, 0x3f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x02, 0x82, 0x90, 0x0d, 0x84, 0x80, 0x00, 0xc3, 0x60, 0x40, 0x3f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x20, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x9f,
++  0xe1, 0x22, 0x01, 0x7c, 0x00, 0x01, 0x1c, 0x6c, 0x00, 0x80, 0x00, 0x7f,
++  0x84, 0x86, 0xc2, 0x43, 0x60, 0x41, 0xdf, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0x40, 0x02, 0x0d, 0x81, 0x06, 0xc2, 0x43, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x01, 0x9c, 0x6c, 0x00, 0x80, 0x02, 0x00, 0x04, 0x85, 0x80, 0x83,
++  0x60, 0x40, 0x7f, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x01, 0x02, 0x70, 0x5d,
++  0x86, 0xaa, 0x80, 0xed, 0x61, 0x21, 0x9f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0x02, 0x70, 0x8d, 0x84, 0x86, 0xc0, 0xc3, 0x60, 0x60, 0x9f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x01, 0x02, 0x70, 0x0d, 0x84, 0x95, 0x40, 0xca,
++  0xa0, 0x61, 0x1f, 0xfc, 0x00, 0x01, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x08,
++  0x84, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x7f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x01, 0xc0, 0x40, 0x0d, 0x82, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x01, 0xc0, 0x50, 0x0d, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0xc0, 0x60, 0x0d,
++  0x82, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x8a, 0xa1, 0x21, 0x1f, 0xfc,
++  0x00, 0x01, 0x1c, 0x6c, 0x01, 0xc0, 0x70, 0x0d, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0xc0, 0x90, 0x0d,
++  0x80, 0x86, 0xc0, 0xc3, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x00, 0x02, 0x86, 0xc0, 0x83, 0x61, 0x20, 0x9f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x01, 0xc0, 0x80, 0x0d, 0x86, 0x86, 0xc0, 0xc3,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x01, 0x1c, 0x6c, 0x00, 0xc0, 0x00, 0x00,
++  0x02, 0x86, 0xc0, 0x8a, 0xa0, 0xa0, 0x5f, 0xfc, 0x20, 0x1f, 0xdc, 0x6c,
++  0x00, 0x41, 0x00, 0x55, 0x01, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x01, 0xc0, 0xb0, 0x0d, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x40, 0x3f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x01, 0xc0, 0xa0, 0x0d,
++  0x86, 0x86, 0xc0, 0xc3, 0x60, 0x41, 0x1f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x00, 0x02, 0x86, 0xc0, 0x83, 0x60, 0x20, 0x3f, 0xfc,
++  0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x97,
++  0xc0, 0x5e, 0x1f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x0d,
++  0x80, 0x86, 0xc0, 0x83, 0x60, 0x40, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x80, 0x86, 0xc0, 0x95, 0x40, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0x82, 0x90, 0x0d, 0x82, 0x95, 0x40, 0xc3,
++  0x60, 0x41, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x00, 0xc1, 0x10, 0x2a,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0xa1, 0x9f, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x82, 0x70, 0x0d, 0x82, 0xbf, 0xc0, 0xc3, 0x60, 0x41, 0x9f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x78, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8a,
++  0xa0, 0xa8, 0x00, 0xfc, 0x00, 0x1f, 0x9c, 0x6c, 0x78, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x80, 0x00, 0xb0, 0x00, 0xfc, 0x00, 0x00, 0x9c, 0x6c,
++  0x00, 0x81, 0x10, 0x0d, 0x82, 0x80, 0x00, 0xc3, 0x60, 0x41, 0x9f, 0xfc,
++  0x00, 0x00, 0x9c, 0x6c, 0x00, 0x81, 0x30, 0x08, 0x82, 0x86, 0xc0, 0xc3,
++  0x60, 0x41, 0xff, 0xfc, 0x00, 0x00, 0x9c, 0x6c, 0x00, 0xc0, 0x00, 0x15,
++  0x82, 0x86, 0xc0, 0x8f, 0x60, 0xa1, 0x9f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x83, 0x60, 0xa1, 0x9f, 0xfc,
++  0x20, 0x1f, 0xdc, 0x6c, 0x00, 0x41, 0x00, 0x7f, 0x81, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x1f, 0xfc, 0x00, 0x1f, 0xac, 0x00, 0x48, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x99, 0x40, 0x5e, 0x1f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x80, 0x86, 0xc0, 0x95, 0x40, 0x21, 0x1f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x82, 0x90, 0x0d, 0x80, 0x95, 0x40, 0xc3,
++  0x60, 0x41, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc1, 0x20, 0x2a,
++  0x81, 0x86, 0xc0, 0x83, 0x60, 0x21, 0x9f, 0xfc, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x82, 0x70, 0x0d, 0x80, 0xbf, 0xc0, 0xc3, 0x60, 0x41, 0x9f, 0xfc,
++  0x00, 0x1f, 0x9c, 0x6c, 0x78, 0x00, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x8a,
++  0xa0, 0x28, 0x00, 0x7c, 0x00, 0x1f, 0x9c, 0x6c, 0x78, 0x00, 0x00, 0x0d,
++  0x81, 0x06, 0xc0, 0x80, 0x00, 0x30, 0x00, 0x7c, 0x00, 0x00, 0x1c, 0x6c,
++  0x00, 0x81, 0x20, 0x0d, 0x80, 0x80, 0x00, 0xc3, 0x60, 0x41, 0x9f, 0xfc,
++  0x00, 0x00, 0x1c, 0x6c, 0x00, 0x81, 0x40, 0x08, 0x80, 0x86, 0xc0, 0xc3,
++  0x60, 0x41, 0xff, 0xfc, 0x00, 0x00, 0x1c, 0x6c, 0x00, 0xc0, 0x00, 0x15,
++  0x80, 0x86, 0xc0, 0x8f, 0x60, 0x21, 0x9f, 0xfc, 0x00, 0x01, 0x1c, 0x6c,
++  0x00, 0xc0, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x82, 0x20, 0x20, 0x7f, 0xfc,
++  0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x0d, 0x84, 0x86, 0xc0, 0x83,
++  0x60, 0x41, 0x9f, 0x9c, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x5d,
++  0x84, 0x86, 0xc0, 0x83, 0x60, 0x41, 0x9f, 0xa1
++};
++static const unsigned int shader_vp_gen_data_size = 4736;
++
+ #endif /* PS3GL_SHADER_DATA_H */
+diff --git a/code/gl/ps3gl_shaders.c b/code/gl/ps3gl_shaders.c
+index 236c969..eba3a0f 100644
+--- a/code/gl/ps3gl_shaders.c
++++ b/code/gl/ps3gl_shaders.c
+@@ -1,8 +1,9 @@
+ /* ps3gl_shaders.c -- GL-to-RSX layer: shader program management. One shared vertex
+- * program, one fragment program per texenv mode. If PS3GL_SHADERS_AVAILABLE==0 the shaders weren't compiled -- every draw is a silent no-op, nothing renders. */
++ * program (q3_vp, or q3_vp_gen under r_ps3_vprog 1), one fragment program per texenv mode. If PS3GL_SHADERS_AVAILABLE==0 the shaders weren't compiled -- every draw is a silent no-op, nothing renders. */
+ 
+ #include "ps3gl.h"
+ #include "ps3gl_shader_data.h"
++#include <stddef.h>
+ #include <stdio.h>
+ 
+ extern void ps3_log(const char *msg);
+@@ -13,6 +14,24 @@ extern uint32_t ps3gl_get_mvp_generation(void);
+ 
+ #if PS3GL_SHADERS_AVAILABLE
+ 
++#if PS3GL_SHADERS_VPGEN
++/* q3_vp_gen's uniforms: one table, so the names cost one TOC entry, not one each */
++#define VPU(n, f, l) { n, offsetof(ps3gl_vparams_t, f), l }
++static const struct { const char *name; size_t off; int len; } vp_uniforms[PS3GL_VP_UNIFORMS] = {
++    VPU("cmul", cmul, 4),       VPU("cadd", cadd, 4),
++    VPU("tm0", tm[0], 16),      VPU("tm1", tm[1], 16),
++    VPU("tsel", tsel, 4),
++    VPU("turb0", turb[0], 4),   VPU("turb1", turb[1], 4),
++    VPU("turbm0", turbm[0], 4), VPU("turbm1", turbm[1], 4),
++    VPU("csel", csel, 4),       VPU("lamb", lamb, 4),
++    VPU("ldir", ldir, 4),       VPU("ldirc", ldirc, 4),   VPU("vorg", vorg, 4), VPU("porg", porg, 4),
++    VPU("dfa0", df[0][0], 4),   VPU("dfb0", df[0][4], 4), VPU("dfc0", df[0][8], 4), VPU("dfm0", df[0][12], 4),
++    VPU("dfa1", df[1][0], 4),   VPU("dfb1", df[1][4], 4), VPU("dfc1", df[1][8], 4), VPU("dfm1", df[1][12], 4),
++    VPU("dfa2", df[2][0], 4),   VPU("dfb2", df[2][4], 4), VPU("dfc2", df[2][8], 4), VPU("dfm2", df[2][12], 4),
++};
++#undef VPU
++#endif
++
+ /* Shader loading helpers */
+ 
+ static void load_vp(ps3gl_shader_t *s, const void *data, uint32_t size)
+@@ -75,9 +94,35 @@ void ps3gl_shaders_init(void)
+ #endif
+     ps3gl.fog_uploaded_gen = 0;
+ 
++    /* r_ps3_vprog 1's VP: any missing uniform keeps r_ps3_vprog off rather than drawing garbage */
++    memset(&ps3gl.vpgen, 0, sizeof(ps3gl.vpgen));
++#if PS3GL_SHADERS_VPGEN
++    {
++        ps3gl_vpgen_t *g = &ps3gl.vpgen;
++        int ok;
++
++        g->vp = (rsxVertexProgram *)shader_vp_gen_data;
++        rsxVertexProgramGetUCode(g->vp, &g->ucode, &g->ucode_size);
++        g->mvp = rsxVertexProgramGetConst(g->vp, "mvp");
++        g->fog_params = rsxVertexProgramGetConst(g->vp, "fogParams");
++        g->fog_color = rsxVertexProgramGetConst(g->vp, "fogColor");
++        ok = g->mvp && g->fog_params && g->fog_color;
++        for (int i = 0; i < PS3GL_VP_UNIFORMS; i++) {
++            g->u[i] = rsxVertexProgramGetConst(g->vp, vp_uniforms[i].name);
++            ok = ok && g->u[i];
++        }
++        if (!ok)
++            g->vp = NULL;
++        ps3_log(ok ? "ps3gl: q3_vp_gen loaded (r_ps3_vprog)"
++                   : "ps3gl: q3_vp_gen uniforms missing, r_ps3_vprog disabled");
++    }
++#endif
++
+     ps3gl.active_shader = -1;
+     ps3gl.active_vp = NULL;
++    ps3gl.loaded_vp = NULL;
+     ps3gl.mvp_uploaded_gen = 0;
++    ps3gl.vp_up_valid = 0;
+     printf("[ps3gl] Shaders loaded: %d modes\n", PS3GL_TENV_COUNT);
+ }
+ 
+@@ -111,7 +156,8 @@ int ps3gl_shader_key(void)
+  * clip w, which is the eye distance along the view axis. */
+ static float s_fog_logged[4];
+ 
+-static void ps3gl_upload_fog(gcmContextData *ctx, ps3gl_shader_t *s)
++static void ps3gl_upload_fog(gcmContextData *ctx, rsxVertexProgram *vp,
++                             rsxProgramConst *params_const, rsxProgramConst *color_const)
+ {
+     float p[4];
+ 
+@@ -129,8 +175,8 @@ static void ps3gl_upload_fog(gcmContextData *ctx, ps3gl_shader_t *s)
+         p[2] = -ps3gl.fog.density * 1.4426950409f;   /* e^-x = 2^(-x log2 e) */
+         p[3] = 0.0f;
+     }
+-    rsxSetVertexProgramParameter(ctx, s->vp, s->fog_params_const, p);
+-    rsxSetVertexProgramParameter(ctx, s->vp, s->fog_color_const, ps3gl.fog.color);
++    rsxSetVertexProgramParameter(ctx, vp, params_const, p);
++    rsxSetVertexProgramParameter(ctx, vp, color_const, ps3gl.fog.color);
+     ps3gl.fog_uploaded_gen = ps3gl.fog.gen;
+ 
+     /* say which fogs get drawn (the first few changes) */
+@@ -165,11 +211,29 @@ void ps3gl_apply_shader(void)
+     gcmContextData *ctx = ps3gl_get_ctx();
+     if (!ctx) return;
+ 
+-    /* All shader slots share one VP (see ps3gl_shaders_init) -- reload it only
+-     * when it's not already bound, not on every FP/texenv key change. */
+-    if (s->vp != ps3gl.active_vp) {
+-        rsxLoadVertexProgram(ctx, s->vp, s->vp_ucode);
+-        ps3gl.active_vp = s->vp;
++    /* All FP slots share one VP: q3_vp, or q3_vp_gen under r_ps3_vprog 1. Reload it only when it is
++     * not bound. The two keep their constants in different registers: after a switch, every constant
++     * (mvp, fog, the q3_vp_gen uniforms) is uploaded again. */
++    rsxVertexProgram *vp = s->vp;
++    void *vp_ucode = s->vp_ucode;
++    rsxProgramConst *mvp_const = s->mvp_const;
++    rsxProgramConst *fogp_const = s->fog_params_const, *fogc_const = s->fog_color_const;
++    if (ps3gl_VProgOn()) {
++        vp = ps3gl.vpgen.vp;
++        vp_ucode = ps3gl.vpgen.ucode;
++        mvp_const = ps3gl.vpgen.mvp;
++        fogp_const = ps3gl.vpgen.fog_params;
++        fogc_const = ps3gl.vpgen.fog_color;
++    }
++    if (vp != ps3gl.active_vp) {
++        rsxLoadVertexProgram(ctx, vp, vp_ucode);
++        if (vp != ps3gl.loaded_vp) {
++            ps3gl.loaded_vp = vp;
++            ps3gl.mvp_uploaded_gen = ps3gl_get_mvp_generation() - 1;
++            ps3gl.fog_uploaded_gen = ps3gl.fog.gen - 1;
++        }
++        ps3gl.active_vp = vp;
++        ps3gl.vp_up_valid = 0;
+     }
+ 
+     if (key != ps3gl.active_shader) {
+@@ -184,15 +248,15 @@ void ps3gl_apply_shader(void)
+     /* MVP constant is independent of which FP is bound -- only re-patch it
+      * when it changed since the last upload (patching RSX microcode isn't free). */
+     uint32_t mvp_gen = ps3gl_get_mvp_generation();
+-    if (s->mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
++    if (mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
+         const float *mvp = ps3gl_get_mvp();
+-        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
++        rsxSetVertexProgramParameter(ctx, vp, mvp_const, mvp);
+         ps3gl.mvp_uploaded_gen = mvp_gen;
+     }
+ 
+ #if PS3GL_SHADERS_FOG
+-    if (key >= PS3GL_TENV_COUNT && ps3gl.fog_uploaded_gen != ps3gl.fog.gen)
+-        ps3gl_upload_fog(ctx, s);
++    if (key >= PS3GL_TENV_COUNT && ps3gl.fog_uploaded_gen != ps3gl.fog.gen && fogp_const && fogc_const)
++        ps3gl_upload_fog(ctx, vp, fogp_const, fogc_const);
+ #endif
+ 
+     /* Upload the world-space clip plane only if this shader binary was recompiled to support
+@@ -203,6 +267,59 @@ void ps3gl_apply_shader(void)
+     }
+ }
+ 
++#if PS3GL_SHADERS_VPGEN
++/* Identity: TEXCOORD0 = ATTR8, TEXCOORD1 = ATTR9, COLOR0 = ATTR3, every select 0: q3_vp_gen draws as q3_vp */
++static const ps3gl_vparams_t vp_identity = {
++    .cmul = { 1.0f, 1.0f, 1.0f, 1.0f },
++    .tm = { { 1, 0, 0, 0, 0, 0, 0, 0,  0, 1, 0, 0, 0, 0, 0, 0 },
++            { 0, 0, 1, 0, 0, 0, 0, 0,  0, 0, 0, 1, 0, 0, 0, 0 } },
++};
++
++/* Upload only the uniforms that differ from what the RSX holds: each one is a command-buffer write. */
++void ps3gl_apply_vparams(const ps3gl_vparams_t *p)
++{
++    gcmContextData *ctx = ps3gl_get_ctx();
++    ps3gl_vpgen_t *g = &ps3gl.vpgen;
++
++    if (!ctx || !g->vp || ps3gl.active_vp != g->vp) return;
++    if (!p) p = &vp_identity;
++
++    for (int i = 0; i < PS3GL_VP_UNIFORMS; i++) {
++        const float *src = (const float *)((const char *)p + vp_uniforms[i].off);
++        float *up = (float *)((char *)&ps3gl.vp_up + vp_uniforms[i].off);
++        size_t bytes = vp_uniforms[i].len * sizeof(float);
++
++        if (ps3gl.vp_up_valid && !memcmp(up, src, bytes))
++            continue;
++        rsxSetVertexProgramParameter(ctx, g->vp, g->u[i], src);
++        memcpy(up, src, bytes);
++    }
++    ps3gl.vp_up_valid = 1;
++}
++
++void ps3gl_SetVProg(int on)
++{
++    if ((uintptr_t)ps3gl_ptr > 0x1000)
++        ps3gl.vprog = on;
++}
++
++int ps3gl_VProgOn(void)
++{
++    return (uintptr_t)ps3gl_ptr > 0x1000 && ps3gl.vprog && ps3gl.vpgen.vp;
++}
++
++void ps3gl_VertexParams(const ps3gl_vparams_t *p)
++{
++    ps3gl.vp_next = *p;
++    ps3gl.vp_pending = 1;
++}
++#else
++void ps3gl_apply_vparams(const ps3gl_vparams_t *p) { (void)p; }
++void ps3gl_SetVProg(int on) { (void)on; }
++int  ps3gl_VProgOn(void) { return 0; }
++void ps3gl_VertexParams(const ps3gl_vparams_t *p) { (void)p; }
++#endif
++
+ #else /* PS3GL_SHADERS_AVAILABLE == 0 */
+ 
+ /* Stub implementations when shaders are not compiled */
+@@ -223,4 +340,9 @@ void ps3gl_apply_shader(void)
+     /* No shaders to apply -- draws will produce no visible output */
+ }
+ 
++void ps3gl_apply_vparams(const ps3gl_vparams_t *p) { (void)p; }
++void ps3gl_SetVProg(int on) { (void)on; }
++int  ps3gl_VProgOn(void) { return 0; }
++void ps3gl_VertexParams(const ps3gl_vparams_t *p) { (void)p; }
++
+ #endif /* PS3GL_SHADERS_AVAILABLE */
+diff --git a/code/gl/ps3gl_vertices.c b/code/gl/ps3gl_vertices.c
+index fc25e96..ac2c4f5 100644
+--- a/code/gl/ps3gl_vertices.c
++++ b/code/gl/ps3gl_vertices.c
+@@ -73,8 +73,16 @@ void ps3gl_vring_shutdown(void)
+ 
+ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
+ {
+-    uint32_t needed = (uint32_t)(count * PS3GL_VERTEX_SIZE);
++    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)ps3gl_vring_alloc_bytes((uint32_t)(count * PS3GL_VERTEX_SIZE), out_offset);
+ 
++    if (ptr)
++        ps3gl_stats.verts += (unsigned)count;
++    return ptr;
++}
++
++/* any 16-byte aligned carve of the current segment (r_ps3_vprog's normals use it too) */
++void *ps3gl_vring_alloc_bytes(uint32_t needed, uint32_t *out_offset)
++{
+     if (ps3gl.vring.head + needed > ps3gl.vring.seg_capacity) {
+         /* Segment full for this frame -- refuse to wrap rather than stomp data the GPU hasn't
+          * fetched yet (submission runs ahead of GPU execution). Should never trip; if it does, drop the batch, don't silently corrupt the frame. */
+@@ -91,13 +99,12 @@ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
+     }
+ 
+     uint32_t seg_base = (uint32_t)ps3gl.vring.cur_seg * ps3gl.vring.seg_capacity;
+-    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)(ps3gl.vring.base + seg_base + ps3gl.vring.head);
++    uint8_t *ptr = ps3gl.vring.base + seg_base + ps3gl.vring.head;
+     *out_offset = ps3gl.vring.base_off + seg_base + ps3gl.vring.head;
+ 
+     /* Round up to 16-byte alignment -- every carve must self-align its own start or
+      * attribute sub-offsets (TC0/TC1/COLOR) drift and RSX vertex fetch wedges the whole console. */
+     ps3gl.vring.head = (ps3gl.vring.head + needed + 15u) & ~15u;
+-    ps3gl_stats.verts += (unsigned)count;
+     if (ps3gl.vring.head > ps3gl_stats.vring_peak)
+         ps3gl_stats.vring_peak = ps3gl.vring.head;
+ 
+@@ -135,6 +142,7 @@ static void flush_immediate(void)
+     ps3gl_apply_matrices();
+     ps3gl_apply_textures();
+     ps3gl_apply_shader();
++    ps3gl_apply_vparams(NULL);      /* q3_vp_gen (r_ps3_vprog): identity */
+ 
+     /* Copy vertices into ring buffer */
+     uint32_t vb_offset;
+@@ -171,6 +179,13 @@ static void flush_immediate(void)
+                              PS3GL_VERTEX_SIZE, 4,
+                              GCM_VERTEX_DATA_TYPE_U8,
+                              ps3gl.vring.location);
++    /* q3_vp_gen fetches ATTR2 on every draw: point it at the positions, its selects keep it unread */
++    if (ps3gl.vpgen.vp && ps3gl.active_vp == ps3gl.vpgen.vp)
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_NORMAL, 0,
++                                 vb_offset + PS3GL_VATTR_POS_OFF,
++                                 PS3GL_VERTEX_SIZE, 3,
++                                 GCM_VERTEX_DATA_TYPE_F32,
++                                 ps3gl.vring.location);
+ 
+     /* Draw */
+     rsxDrawVertexArray(ctx, gl_to_gcm_prim(ps3gl.imm.prim), 0, count);
+diff --git a/code/gl/ps3gl_vprog.h b/code/gl/ps3gl_vprog.h
+new file mode 100644
+index 0000000..4e21390
+--- /dev/null
++++ b/code/gl/ps3gl_vprog.h
+@@ -0,0 +1,29 @@
++/* ps3gl_vprog.h -- r_ps3_vprog 1: per-draw q3_vp_gen parameters, shared by ps3gl and the renderer
++ * (tr_ps3_vprog.c). From IoQuake3-PS3 (Mayo1970), adapted to iortcw. Plain C types only, so the
++ * renderer can include it next to tr_local.h. */
++#ifndef PS3GL_VPROG_H
++#define PS3GL_VPROG_H
++
++/* q3_vp_gen.vcg's uniforms (same names, see there), plus the raw tess arrays behind ATTR2/3/8/9 */
++typedef struct {
++    float       cmul[4], cadd[4];   /* oColor = color * cmul + cadd (+ the csel terms) */
++    float       tm[2][16];          /* per bundle: s over (st, lm, xyz, 1), then t over the same */
++    float       tsel[4];            /* env bundle 0 / 1, turb bundle 0 / 1 */
++    float       turb[2][4], turbm[2][4];
++    float       csel[4];            /* lightingDiffuse, lightingSpecular, portal, any */
++    float       lamb[4], ldir[4], ldirc[4];
++    float       vorg[4], porg[4];
++    float       df[3][16];          /* deform slots: dfa, dfb, dfc, dfm */
++    const void *color;              /* 4 x u8 per vertex, stride 4 */
++    const void *st, *lm;            /* 2 x f32 per vertex, stride tc_stride */
++    const void *normal;             /* 3 x f32 per vertex, stride 16; NULL when q3_vp_gen reads no normal */
++    int         tc_stride;
++} ps3gl_vparams_t;
++
++#define PS3GL_VP_UNIFORMS   27
++
++void ps3gl_SetVProg(int on);                        /* once per frame (back end), from r_ps3_vprog */
++int  ps3gl_VProgOn(void);                           /* r_ps3_vprog 1 and q3_vp_gen loaded */
++void ps3gl_VertexParams(const ps3gl_vparams_t *p);  /* one-shot: applies to the next ps3gl_DrawElements */
++
++#endif
+diff --git a/code/gl/shaders/asm/q3_vp_gen.vpa b/code/gl/shaders/asm/q3_vp_gen.vpa
+new file mode 100644
+index 0000000..441ab24
+--- /dev/null
++++ b/code/gl/shaders/asm/q3_vp_gen.vpa
+@@ -0,0 +1,326 @@
++# q3_vp_gen.vpa -- GENERATED from ../q3_vp_gen.vcg by: cgc -profile vp40 -ifcvt none (nvidia-cg-toolkit 3.1).
++# Edit the .vcg and regenerate; assemble_shaders.sh only assembles this file.
++!!ARBvp1.0
++OPTION NV_vertex_program3;
++# cgc version 3.1.0013, build date Apr 24 2012
++# command line args: -profile vp40 -ifcvt none
++# source file: q3_vp_gen.vcg
++#vendor NVIDIA Corporation
++#version 3.1.0.13
++#profile vp40
++#program main
++#semantic main.mvp
++#semantic main.fogParams
++#semantic main.fogColor
++#semantic main.cmul
++#semantic main.cadd
++#semantic main.tm0
++#semantic main.tm1
++#semantic main.tsel
++#semantic main.turb0
++#semantic main.turb1
++#semantic main.turbm0
++#semantic main.turbm1
++#semantic main.csel
++#semantic main.lamb
++#semantic main.ldir
++#semantic main.ldirc
++#semantic main.vorg
++#semantic main.porg
++#semantic main.dfa0
++#semantic main.dfb0
++#semantic main.dfc0
++#semantic main.dfm0
++#semantic main.dfa1
++#semantic main.dfb1
++#semantic main.dfc1
++#semantic main.dfm1
++#semantic main.dfa2
++#semantic main.dfb2
++#semantic main.dfc2
++#semantic main.dfm2
++#var float4 position : $vin.ATTR0 : ATTR0 : 0 : 1
++#var float3 normal : $vin.ATTR2 : ATTR2 : 1 : 1
++#var float4 color : $vin.ATTR3 : ATTR3 : 2 : 1
++#var float2 st : $vin.ATTR8 : ATTR8 : 3 : 1
++#var float2 lm : $vin.ATTR9 : ATTR9 : 4 : 1
++#var float4x4 mvp :  : c[0], 4 : 5 : 1
++#var float4 fogParams :  : c[12] : 6 : 1
++#var float4 fogColor :  : c[13] : 7 : 1
++#var float4 cmul :  : c[14] : 8 : 1
++#var float4 cadd :  : c[15] : 9 : 1
++#var float4x4 tm0 :  : c[4], 4 : 10 : 1
++#var float4x4 tm1 :  : c[8], 4 : 11 : 1
++#var float4 tsel :  : c[16] : 12 : 1
++#var float4 turb0 :  : c[17] : 13 : 1
++#var float4 turb1 :  : c[18] : 14 : 1
++#var float4 turbm0 :  : c[19] : 15 : 1
++#var float4 turbm1 :  : c[20] : 16 : 1
++#var float4 csel :  : c[21] : 17 : 1
++#var float4 lamb :  : c[22] : 18 : 1
++#var float4 ldir :  : c[23] : 19 : 1
++#var float4 ldirc :  : c[24] : 20 : 1
++#var float4 vorg :  : c[25] : 21 : 1
++#var float4 porg :  : c[26] : 22 : 1
++#var float4 dfa0 :  : c[27] : 23 : 1
++#var float4 dfb0 :  : c[28] : 24 : 1
++#var float4 dfc0 :  : c[29] : 25 : 1
++#var float4 dfm0 :  : c[30] : 26 : 1
++#var float4 dfa1 :  : c[31] : 27 : 1
++#var float4 dfb1 :  : c[32] : 28 : 1
++#var float4 dfc1 :  : c[33] : 29 : 1
++#var float4 dfm1 :  : c[34] : 30 : 1
++#var float4 dfa2 :  : c[35] : 31 : 1
++#var float4 dfb2 :  : c[36] : 32 : 1
++#var float4 dfc2 :  : c[37] : 33 : 1
++#var float4 dfm2 :  : c[38] : 34 : 1
++#var float4 oPosition : $vout.POSITION : HPOS : 35 : 1
++#var float4 oColor : $vout.COLOR0 : COL0 : 36 : 1
++#var float2 oTc0 : $vout.TEXCOORD0 : TEX0 : 37 : 1
++#var float2 oTc1 : $vout.TEXCOORD1 : TEX1 : 38 : 1
++#var float4 oFog : $vout.TEXCOORD2 : TEX2 : 39 : 1
++#const c[39] = 1 0.5 2 6.2831855
++#const c[40] = 0 -960 1980 96
++#const c[41] = 9.9999997e-21 0.0009765625
++PARAM c[42] = { program.local[0..38],
++		{ 1, 0.5, 2, 6.2831855 },
++		{ 0, -960, 1980, 96 },
++		{ 9.9999997e-21, 0.0009765625 } };
++TEMP R0;
++TEMP R1;
++TEMP R2;
++TEMP R3;
++TEMP R4;
++TEMP R5;
++TEMP RC, HC;
++BB0:
++MOVC  RC.x, c[29].z;
++MOV   R2.xyz, vertex.attrib[0];
++BRA   BB6 (LE.x);
++BB1:
++ADD   R0.x, vertex.attrib[0], vertex.attrib[0].y;
++MOVC  RC.x, c[33].z;
++MUL   R0.y, vertex.attrib[8].x, c[27].w;
++ADD   R0.x, vertex.attrib[0].z, R0;
++MAD   R0.x, R0, c[27].z, R0.y;
++ADD   R0.w, c[28].x, R0.x;
++FRC   R0.x, R0.w;
++MUL   R0.y, R0.x, c[39].z;
++FRC   R0.y, R0;
++MAD   R0.z, R0.y, c[39], -c[39].x;
++SGE   R0.y, R0.x, c[39];
++MAD   R0.y, -R0, c[39].z, c[39].x;
++MUL   R0.w, R0, c[39];
++ADD   R0.z, c[39].x, -|R0|;
++MUL   R1.x, R0.y, c[28].z;
++SIN   R0.w, R0.w;
++MUL   R0.y, R0, R0.z;
++MAD   R0.w, R0, c[28].y, R1.x;
++MAD   R0.y, R0, c[28].w, R0.w;
++MAD   R0.y, R0.x, c[29].x, R0;
++ADD   R0.x, c[39], -R0;
++MAD   R0.x, R0, c[29].y, R0.y;
++MAD   R0.x, R0, c[27].y, c[27];
++MUL   R0.xyz, vertex.attrib[2], R0.x;
++ADD   R0.xyz, R0, vertex.attrib[0];
++ADD   R2.xyz, c[30], R0;
++BRA   BB5 (LE.x);
++BB2:
++ADD   R0.x, R2, R2.y;
++MOVC  RC.x, c[37].z;
++MUL   R0.y, vertex.attrib[8].x, c[31].w;
++ADD   R0.x, R2.z, R0;
++MAD   R0.x, R0, c[31].z, R0.y;
++ADD   R0.w, c[32].x, R0.x;
++FRC   R0.x, R0.w;
++MUL   R0.y, R0.x, c[39].z;
++FRC   R0.y, R0;
++MAD   R0.z, R0.y, c[39], -c[39].x;
++SGE   R0.y, R0.x, c[39];
++MAD   R0.y, -R0, c[39].z, c[39].x;
++MUL   R0.w, R0, c[39];
++ADD   R0.z, c[39].x, -|R0|;
++MUL   R1.x, R0.y, c[32].z;
++SIN   R0.w, R0.w;
++MUL   R0.y, R0, R0.z;
++MAD   R0.w, R0, c[32].y, R1.x;
++MAD   R0.y, R0, c[32].w, R0.w;
++MAD   R0.y, R0.x, c[33].x, R0;
++ADD   R0.x, c[39], -R0;
++MAD   R0.x, R0, c[33].y, R0.y;
++MAD   R0.x, R0, c[31].y, c[31];
++MAD   R0.xyz, vertex.attrib[2], R0.x, R2;
++ADD   R2.xyz, c[34], R0;
++BRA   BB4 (LE.x);
++BB3:
++ADD   R0.x, R2, R2.y;
++MUL   R0.y, vertex.attrib[8].x, c[35].w;
++ADD   R0.x, R2.z, R0;
++MAD   R0.x, R0, c[35].z, R0.y;
++ADD   R0.w, c[36].x, R0.x;
++FRC   R0.x, R0.w;
++MUL   R0.y, R0.x, c[39].z;
++FRC   R0.y, R0;
++MAD   R0.z, R0.y, c[39], -c[39].x;
++SGE   R0.y, R0.x, c[39];
++MAD   R0.y, -R0, c[39].z, c[39].x;
++MUL   R0.w, R0, c[39];
++ADD   R0.z, c[39].x, -|R0|;
++MUL   R1.x, R0.y, c[36].z;
++SIN   R0.w, R0.w;
++MUL   R0.y, R0, R0.z;
++MAD   R0.w, R0, c[36].y, R1.x;
++MAD   R0.y, R0, c[36].w, R0.w;
++MAD   R0.y, R0.x, c[37].x, R0;
++ADD   R0.x, c[39], -R0;
++MAD   R0.x, R0, c[37].y, R0.y;
++MAD   R0.x, R0, c[35].y, c[35];
++MAD   R0.xyz, vertex.attrib[2], R0.x, R2;
++ADD   R2.xyz, c[38], R0;
++BB4:
++BB5:
++BB6:
++MOVC  RC.x, c[21].w;
++MOV   R0.w, c[39].x;
++MOV   R0.xyz, R2;
++DP4   R1.x, R0, c[3];
++MUL   R1.y, R1.x, c[12].z;
++EX2   R1.y, R1.y;
++MAD   R1.z, R1.x, c[12].x, c[12].y;
++ADD   R1.z, R1, -R1.y;
++MAD   result.texcoord[2].w, R1.z, c[12], R1.y;
++MOV   result.position.w, R1.x;
++MUL   R1, vertex.attrib[3], c[14];
++DP4   result.position.z, R0, c[2];
++DP4   result.position.y, R0, c[1];
++DP4   result.position.x, R0, c[0];
++ADD   R1, c[15], R1;
++MOV   result.texcoord[2].xyz, c[13];
++BRA   BB14 (LE.x);
++BB7:
++MOVC  RC.x, c[21];
++BRA   BB9 (LE.x);
++BB8:
++DP3   R2.w, vertex.attrib[2], c[23];
++MAX   R2.w, R2, c[40].x;
++MUL   R3.xyz, R2.w, c[24];
++ADD_SAT R3.xyz, c[22], R3;
++ADD   R1.xyz, R1, R3;
++BB9:
++MOVC  RC.x, c[21].y;
++BRA   BB11 (LE.x);
++BB10:
++ADD   R3.xyz, c[40].yzww, -R2;
++DP3   R2.w, R3, R3;
++MAX   R2.w, R2, c[41].x;
++RSQ   R2.w, R2.w;
++MUL   R3.xyz, R2.w, R3;
++DP3   R2.w, vertex.attrib[2], R3;
++MUL   R4.xyz, R2.w, vertex.attrib[2];
++ADD   R5.xyz, c[25], -R2;
++DP3   R2.w, R5, R5;
++MAD   R3.xyz, R4, c[39].z, -R3;
++MAX   R2.w, R2, c[41].x;
++DP3   R3.x, R5, R3;
++RSQ   R2.w, R2.w;
++MUL   R2.w, R2, R3.x;
++MAX   R2.w, R2, c[40].x;
++MUL   R2.w, R2, R2;
++MUL   R2.w, R2, R2;
++MIN   R2.w, R2, c[39].x;
++ADD   R1.w, R1, R2;
++BB11:
++MOVC  RC.x, c[21].z;
++BRA   BB13 (LE.x);
++BB12:
++ADD   R3.xyz, -c[26], R2;
++DP3   R2.w, R3, R3;
++RSQ   R2.w, R2.w;
++RCP   R2.w, R2.w;
++MUL_SAT R2.w, R2, c[26];
++ADD   R1.w, R1, R2;
++BB13:
++BB14:
++MOV   R2.w, c[39].x;
++DP4C  HC.x, R2.w, c[16];
++MOV   result.color, R1;
++MOV   R3.zw, vertex.attrib[9].xyxy;
++MOV   R3.xy, vertex.attrib[8];
++MOV   R1, R3;
++BRA   BB20 (LE.x);
++BB15:
++MOVC  RC.x, c[16];
++BRA   BB17 (LE.x);
++BB16:
++ADD   R4.xyz, c[25], -R2;
++DP3   R1.z, R4, R4;
++MAX   R1.z, R1, c[41].x;
++RSQ   R1.z, R1.z;
++MUL   R4.xyz, R1.z, R4;
++DP3   R1.z, vertex.attrib[2], R4;
++MUL   R1.zw, R1.z, vertex.attrib[2].xyyz;
++MAD   R1.zw, R1, c[39].z, -R4.xyyz;
++MAD   R1.w, -R1, c[39].y, c[39].y;
++MAD   R1.z, R1, c[39].y, c[39].y;
++BB17:
++MOVC  RC.x, c[16].y;
++BRA   BB19 (LE.x);
++BB18:
++ADD   R2.xyz, c[25], -R2;
++DP3   R2.w, R2, R2;
++MAX   R2.w, R2, c[41].x;
++RSQ   R2.w, R2.w;
++MUL   R2.xyz, R2.w, R2;
++DP3   R2.x, vertex.attrib[2], R2;
++MUL   R3.zw, R2.x, vertex.attrib[2].xyyz;
++MAD   R2.xy, R3.zwzw, c[39].z, -R2.yzzw;
++MAD   R2.y, -R2, c[39], c[39];
++MAD   R2.x, R2, c[39].y, c[39].y;
++MOV   R3.zw, R2.xyxy;
++BB19:
++BB20:
++DP4   R2.x, R1, c[4];
++DP4   R2.y, R0, c[5];
++DP4   R1.x, R1, c[6];
++ADD   R2.x, R2, R2.y;
++DP4   R2.y, R0, c[7];
++DP4   R1.y, R0, c[9];
++ADD   R2.y, R1.x, R2;
++DP4   R1.x, R3, c[8];
++ADD   R2.z, R1.x, R1.y;
++MOVC  RC.x, c[16].z;
++DP4   R0.w, R0, c[11];
++DP4   R1.x, R3, c[10];
++ADD   R2.w, R1.x, R0;
++BRA   BB22 (LE.x);
++BB21:
++MOV   R1.y, R0;
++ADD   R1.x, R0, R0.z;
++MUL   R1.xy, R1, c[41].y;
++ADD   R1.xy, c[17].y, R1;
++MUL   R1.xy, R1, c[39].w;
++SIN   R1.y, R1.y;
++SIN   R1.x, R1.x;
++MUL   R1.xy, R1, c[17].x;
++MUL   R1, R1.xyxy, c[19];
++ADD   R1.xy, R1.xzzw, R1.ywzw;
++ADD   R2.xy, R2, R1;
++BB22:
++MOVC  RC.x, c[16].w;
++BRA   BB24 (LE.x);
++BB23:
++ADD   R0.x, R0, R0.z;
++MUL   R0.xy, R0, c[41].y;
++ADD   R0.xy, c[18].y, R0;
++MUL   R0.xy, R0, c[39].w;
++SIN   R0.y, R0.y;
++SIN   R0.x, R0.x;
++MUL   R0.xy, R0, c[18].x;
++MUL   R0, R0.xyxy, c[20];
++ADD   R0.xy, R0.xzzw, R0.ywzw;
++ADD   R2.zw, R2, R0.xyxy;
++BB24:
++MOV   result.texcoord[0].xy, R2;
++MOV   result.texcoord[1].xy, R2.zwzw;
++END
++# 204 instructions, 6 R-regs
+diff --git a/code/gl/shaders/assemble_shaders.sh b/code/gl/shaders/assemble_shaders.sh
+index cefac1a..615bb11 100755
+--- a/code/gl/shaders/assemble_shaders.sh
++++ b/code/gl/shaders/assemble_shaders.sh
+@@ -1,9 +1,14 @@
+ #!/bin/bash
+ #
+-# assemble_shaders.sh -- regenerate ../ps3gl_shader_data.h without a Cg
+-# compiler (NVIDIA's cgc/libCg is not available for Linux x86_64 anymore).
++# assemble_shaders.sh -- regenerate ../ps3gl_shader_data.h from NV40
++# assembly, with PSL1GHT's cgcomp only (no Cg compiler needed). The one
++# generated file, asm/q3_vp_gen.vpa, comes from Ubuntu's nvidia-cg-toolkit:
++#   cgc -profile vp40 -ifcvt none -o asm/q3_vp_gen.vpa q3_vp_gen.vcg
++# (then put back its two header comment lines).
+ #
+ #   asm/q3_vp.vpa          vertex program (NV40 assembly, with fog)
++#   asm/q3_vp_gen.vpa      r_ps3_vprog 1 vertex program (with fog), generated
++#                          from q3_vp_gen.vcg by cgc (see the .vcg)
+ #   asm/q3_fp_*_fog.fpa    fragment programs with fog
+ #   q3_fp_*.fpo            fragment programs without fog (from the .fcg)
+ #
+@@ -19,6 +24,7 @@ OUT=$(mktemp -d)
+ trap 'rm -rf "$OUT"' EXIT
+ 
+ "$CGCOMP" -v -a asm/q3_vp.vpa "$OUT/q3_vp.vpo"
++"$CGCOMP" -v -a asm/q3_vp_gen.vpa "$OUT/q3_vp_gen.vpo"
+ for m in coloronly modulate replace decal add blend modulate2; do
+     "$CGCOMP" -f -a asm/q3_fp_${m}_fog.fpa "$OUT/q3_fp_${m}_fog.fpo"
+ done
+@@ -32,6 +38,7 @@ for m in modes:
+     files.append((f"q3_fp_{m}.fpo", f"shader_fp_{m}_data"))
+ for m in modes:
+     files.append((os.path.join(out, f"q3_fp_{m}_fog.fpo"), f"shader_fp_{m}_fog_data"))
++files.append((os.path.join(out, "q3_vp_gen.vpo"), "shader_vp_gen_data"))
+ lines = [
+     "/* ps3gl_shader_data.h -- Auto-generated embedded shader binaries. Do not edit manually.",
+     " * Regenerate with: cd shaders && ./assemble_shaders.sh */",
+@@ -40,6 +47,7 @@ lines = [
+     "",
+     "#define PS3GL_SHADERS_AVAILABLE 1",
+     "#define PS3GL_SHADERS_FOG 1",
++    "#define PS3GL_SHADERS_VPGEN 1",
+     "",
+ ]
+ for fname, var in files:
+diff --git a/code/gl/shaders/q3_vp_gen.vcg b/code/gl/shaders/q3_vp_gen.vcg
+new file mode 100644
+index 0000000..490ecdf
+--- /dev/null
++++ b/code/gl/shaders/q3_vp_gen.vcg
+@@ -0,0 +1,139 @@
++/* q3_vp_gen.vcg -- r_ps3_vprog 1 vertex program: surface deforms, stage colors and texcoords from per-draw
++ * uniforms, so the PPU does not compute them per vertex. From IoQuake3-PS3's q3_vp_gen.vcg (Mayo1970),
++ * adapted to iortcw: GL fog as in asm/q3_vp.vpa, and RTCW's RB_CalcDiffuseColor (no unlit-side ambient).
++ * Identity uniforms draw exactly as q3_vp.
++ *
++ * Built with cgc -profile vp40 -ifcvt none (each feature is a real branch: a draw pays only for what it
++ * uses), then cgcomp -a. cgc comes from Ubuntu's nvidia-cg-toolkit package; the generated assembly is
++ * kept in asm/q3_vp_gen.vpa, so assemble_shaders.sh still needs only cgcomp. */
++
++/* Q3's waveform tables as periodic functions of p (period 1): table[(int)(p * 1024) & 1023] */
++float waveval(float4 b, float4 c, float p)
++{
++    float f   = frac(p);
++    float sq  = 1.0 - 2.0 * step(0.5, f);
++    float tri = sq * (1.0 - abs(2.0 * frac(2.0 * f) - 1.0));
++    return b.y * sin(6.2831853 * p) + b.z * sq + b.w * tri + c.x * f + c.y * (1.0 - f);
++}
++
++/* deformVertexes wave / bulge / move: pos += n * (A + B * wave(p)) + M, p = (x + y + z) * spread + s * stw + c */
++float3 deform(float3 pos, float3 n, float s, float4 a, float4 b, float4 c, float4 m)
++{
++    float p = (pos.x + pos.y + pos.z) * a.z + s * a.w + b.x;
++    return pos + n * (a.x + a.y * waveval(b, c, p)) + m.xyz;
++}
++
++/* RB_CalcEnvironmentTexCoords; the max() keeps a vertex on the eye from turning into NaN */
++float2 envmap(float3 pos, float3 n, float3 eye)
++{
++    float3 v = eye - pos;
++    v *= rsqrt(max(dot(v, v), 1e-20));
++    float3 r = n * (2.0 * dot(n, v)) - v;
++    return float2(0.5 + r.y * 0.5, 0.5 - r.z * 0.5);
++}
++
++/* RB_CalcTurbulentTexCoords offset, through the 2x2 of the tcMods after the turb */
++float2 turbulent(float4 b, float4 turb, float4 turbm)
++{
++    float2 d = turb.x * sin(6.2831853 * (float2(b.x + b.z, b.y) * (1.0 / 1024.0) + turb.y));
++    return float2(dot(turbm.xy, d), dot(turbm.zw, d));
++}
++
++void main(
++    float4 position : ATTR0,
++    float3 normal   : ATTR2,
++    float4 color    : ATTR3,
++    float2 st       : ATTR8,
++    float2 lm       : ATTR9,
++
++    uniform float4x4 mvp,
++    uniform float4   fogParams, /* as q3_vp.vpa: linear scale, linear bias, exp2 scale, linear weight */
++    uniform float4   fogColor,
++    uniform float4   cmul,
++    uniform float4   cadd,
++    /* per bundle, rows: s over (st, lm), s over (xyz, 1), t over (st, lm), t over (xyz, 1) */
++    uniform float4x4 tm0,
++    uniform float4x4 tm1,
++    uniform float4   tsel,      /* x, y: bundle 0 / 1 reads env in lm's place; z, w: bundle 0 / 1 has a turb */
++    uniform float4   turb0,     /* amp, frac(now) */
++    uniform float4   turb1,
++    uniform float4   turbm0,    /* s += x ds + y dt, t += z ds + w dt */
++    uniform float4   turbm1,
++    uniform float4   csel,      /* x lightingDiffuse rgb, y lightingSpecular alpha, z portal alpha, w any */
++    uniform float4   lamb,      /* ambientLight / 255 */
++    uniform float4   ldir,      /* entity lightDir */
++    uniform float4   ldirc,     /* directedLight / 255 */
++    uniform float4   vorg,      /* backEnd.or.viewOrigin */
++    uniform float4   porg,      /* viewParms.or.origin, w = 1 / portalRange */
++    /* deform slots: a = (A, B, spread, stw), b = (c, sin, square, triangle), c = (saw, invsaw, on), m = M */
++    uniform float4   dfa0, uniform float4 dfb0, uniform float4 dfc0, uniform float4 dfm0,
++    uniform float4   dfa1, uniform float4 dfb1, uniform float4 dfc1, uniform float4 dfm1,
++    uniform float4   dfa2, uniform float4 dfb2, uniform float4 dfc2, uniform float4 dfm2,
++
++    out float4 oPosition : POSITION,
++    out float4 oColor    : COLOR0,
++    out float2 oTc0      : TEXCOORD0,
++    out float2 oTc1      : TEXCOORD1,
++    out float4 oFog      : TEXCOORD2
++)
++{
++    float3 pos = position.xyz;
++
++    if (dfc0.z > 0.0) {
++        pos = deform(pos, normal, st.x, dfa0, dfb0, dfc0, dfm0);
++        if (dfc1.z > 0.0) {
++            pos = deform(pos, normal, st.x, dfa1, dfb1, dfc1, dfm1);
++            if (dfc2.z > 0.0)
++                pos = deform(pos, normal, st.x, dfa2, dfb2, dfc2, dfm2);
++        }
++    }
++
++    float4 b = float4(pos, 1.0);
++    float4 cp = mul(mvp, b);
++    oPosition = cp;
++
++    /* GL fog factor from the clip w (eye distance), as q3_vp.vpa; fog off: (0, 1, 0, 1) -> 1 */
++    float fe = exp2(cp.w * fogParams.z);
++    oFog = float4(fogColor.xyz, fe + fogParams.w * (cp.w * fogParams.x + fogParams.y - fe));
++
++    float4 c = color * cmul + cadd;
++    if (csel.w > 0.0) {
++        if (csel.x > 0.0) {
++            /* RB_CalcDiffuseColor (iortcw): clamp(ambient + max(n . l, 0) * directed) */
++            float inc = max(dot(normal, ldir.xyz), 0.0);
++            c.rgb += saturate(lamb.rgb + inc * ldirc.rgb);
++        }
++        if (csel.y > 0.0) {
++            /* RB_CalcSpecularAlpha, with its fixed lightOrigin */
++            float3 l = float3(-960.0, 1980.0, 96.0) - pos;
++            l *= rsqrt(max(dot(l, l), 1e-20));
++            float3 r = normal * (2.0 * dot(normal, l)) - l;
++            float3 v = vorg.xyz - pos;
++            float s = max(dot(r, v) * rsqrt(max(dot(v, v), 1e-20)), 0.0);
++            s *= s;
++            c.a += min(s * s, 1.0);
++        }
++        if (csel.z > 0.0) {
++            float3 d = pos - porg.xyz;
++            c.a += saturate(sqrt(dot(d, d)) * porg.w);
++        }
++    }
++    oColor = c;
++
++    float4 a0 = float4(st, lm), a1 = a0;
++    float2 t0, t1;
++    if (dot(tsel, float4(1.0, 1.0, 1.0, 1.0)) > 0.0) {
++        if (tsel.x > 0.0)
++            a0.zw = envmap(pos, normal, vorg.xyz);
++        if (tsel.y > 0.0)
++            a1.zw = envmap(pos, normal, vorg.xyz);
++    }
++    t0 = float2(dot(tm0[0], a0) + dot(tm0[1], b), dot(tm0[2], a0) + dot(tm0[3], b));
++    t1 = float2(dot(tm1[0], a1) + dot(tm1[1], b), dot(tm1[2], a1) + dot(tm1[3], b));
++    if (tsel.z > 0.0)
++        t0 += turbulent(b, turb0, turbm0);
++    if (tsel.w > 0.0)
++        t1 += turbulent(b, turb1, turbm1);
++    oTc0 = t0;
++    oTc1 = t1;
++}
+diff --git a/code/renderer/ps3/tr_ps3_vprog.c b/code/renderer/ps3/tr_ps3_vprog.c
+new file mode 100644
+index 0000000..de9aae2
+--- /dev/null
++++ b/code/renderer/ps3/tr_ps3_vprog.c
+@@ -0,0 +1,512 @@
++/* tr_ps3_vprog.c -- r_ps3_vprog 1: the per-vertex stage work moves from the PPU to the RSX.
++ *
++ * From IoQuake3-PS3's ps3_renderer.c (Mayo1970, "RSX changes", V1-V5), adapted to iortcw's renderer.
++ * A stage's rgbGen / alphaGen / tcGen / tcMods and a surface's deforms are folded into the uniforms of
++ * q3_vp_gen (code/gl/shaders/q3_vp_gen.vcg), so ComputeColors, ComputeTexCoords and
++ * RB_DeformTessGeometry stop running a loop over every vertex of every stage. ps3gl then reads the raw
++ * tess arrays, and the later stages of a surface reuse the first stage's copy of them.
++ *
++ * Each helper mirrors tr_shade.c / tr_shade_calc.c. Anything the VP cannot reproduce returns qfalse,
++ * and that stage (or surface) takes the PPU path, exactly as before. iortcw specifics:
++ *   - tcMod swap is an affine map; RB_CalcDiffuseColor has no unlit-side ambient (see the .vcg)
++ *   - the PPU keeps: alphaGen normalzfade, tcGen firerise env, fading entities (fadeStartTime),
++ *     fire-rise deforms (negative wave frequency), r_primitives other than 2.
++ * Back end only (render thread under r_smp). All state in one struct: TOC budget (see the Makefile). */
++
++#include "../tr_local.h"
++#include "../../gl/ps3gl_vprog.h"
++
++static struct {
++	/* the current surface's deforms: armed by RB_PS3_SurfaceDeforms, sent with every stage of it */
++	qboolean deformActive;
++	qboolean deformNormal;      /* a slot moves along tess.normal */
++	float df[3][16];
++} ps3vp;
++
++/* EvalWaveForm (static in tr_shade_calc.c); qfalse on a bad func, which EvalWaveForm drops on */
++static qboolean PS3_WaveValue( const waveForm_t *wf, float *out ) {
++	const float *table;
++
++	if ( wf->func == GF_NOISE ) {
++		*out = wf->base + R_NoiseGet4f( 0, 0, 0, ( tess.shaderTime + wf->phase ) * wf->frequency ) * wf->amplitude;
++		return qtrue;
++	}
++	switch ( wf->func ) {
++	case GF_SIN:              table = tr.sinTable; break;
++	case GF_TRIANGLE:         table = tr.triangleTable; break;
++	case GF_SQUARE:           table = tr.squareTable; break;
++	case GF_SAWTOOTH:         table = tr.sawToothTable; break;
++	case GF_INVERSE_SAWTOOTH: table = tr.inverseSawToothTable; break;
++	default:                  return qfalse;
++	}
++	*out = wf->base + table[( (int64_t)( ( wf->phase + tess.shaderTime * wf->frequency ) * FUNCTABLE_SIZE ) )
++							& FUNCTABLE_MASK] * wf->amplitude;
++	return qtrue;
++}
++
++/* q3_vp_gen's waveval() weights: b = (c, sin, square, triangle), c = (saw, invsaw, on) */
++static qboolean PS3_WaveWeights( genFunc_t func, float *b, float *c ) {
++	switch ( func ) {
++	case GF_SIN:              b[1] = 1.0f; return qtrue;
++	case GF_SQUARE:           b[2] = 1.0f; return qtrue;
++	case GF_TRIANGLE:         b[3] = 1.0f; return qtrue;
++	case GF_SAWTOOTH:         c[0] = 1.0f; return qtrue;
++	case GF_INVERSE_SAWTOOTH: c[1] = 1.0f; return qtrue;
++	default:                  return qfalse;   /* noise varies per vertex */
++	}
++}
++
++/* RB_CalcDiffuseColor's inputs (iortcw: clamp(ambient + max(n . l, 0) * directed), alpha 255) */
++static void PS3_DiffuseParams( const trRefEntity_t *ent, ps3gl_vparams_t *p ) {
++	int i;
++
++	p->csel[0] = 1.0f;
++	for ( i = 0; i < 3; i++ ) {
++		p->lamb[i] = ent->ambientLight[i] / 255.0f;
++		p->ldir[i] = ent->lightDir[i];
++		p->ldirc[i] = ent->directedLight[i] / 255.0f;
++	}
++}
++
++/* COLOR0 channel = vertex * mul + add (+ the csel terms). Constants are bytes, as in ComputeColors, then b / 255. */
++static qboolean PS3_ColorParams( const shaderStage_t *pStage, ps3gl_vparams_t *p ) {
++	enum { K_CONST, K_VERTEX, K_ONE_MINUS_VERTEX } kind = K_CONST;
++	const trRefEntity_t *ent = backEnd.currentEntity;
++	float *mul = p->cmul, *add = p->cadd;
++	byte k[4] = { 255, 255, 255, 255 };
++	float scale = 1.0f, glow;
++	int i, v;
++
++	switch ( pStage->rgbGen ) {
++	case CGEN_IDENTITY:
++		break;
++	case CGEN_EXACT_VERTEX:
++		kind = K_VERTEX;
++		break;
++	case CGEN_VERTEX:
++		kind = K_VERTEX;
++		scale = tr.identityLight;
++		break;
++	case CGEN_ONE_MINUS_VERTEX:
++		kind = K_ONE_MINUS_VERTEX;
++		scale = tr.identityLight;
++		break;
++	case CGEN_CONST:
++		Com_Memcpy( k, pStage->constantColor, 4 );
++		break;
++	case CGEN_FOG:
++		if ( !tr.world ) {
++			return qfalse;
++		}
++		Com_Memcpy( k, &tr.world->fogs[tess.fogNum].colorInt, 4 );
++		break;
++	case CGEN_WAVEFORM:
++		/* RB_CalcWaveColor: identityLight scales every func but noise */
++		if ( !PS3_WaveValue( &pStage->rgbWave, &glow ) ) {
++			return qfalse;
++		}
++		if ( pStage->rgbWave.func != GF_NOISE ) {
++			glow *= tr.identityLight;
++		}
++		glow = glow < 0 ? 0 : ( glow > 1 ? 1 : glow );
++		k[0] = k[1] = k[2] = ri.ftol( 255 * glow );
++		break;
++	case CGEN_ENTITY:
++	case CGEN_ONE_MINUS_ENTITY:
++		if ( !ent ) {
++			return qfalse;
++		}
++		for ( i = 0; i < 4; i++ ) {
++			k[i] = ent->e.shaderRGBA[i];
++			if ( pStage->rgbGen == CGEN_ONE_MINUS_ENTITY ) {
++				k[i] = 255 - k[i];
++			}
++		}
++		break;
++	case CGEN_LIGHTING_DIFFUSE:
++		/* rgb comes from the VP's lighting term, alpha is 255 */
++		if ( !ent ) {
++			return qfalse;
++		}
++		k[0] = k[1] = k[2] = 0;
++		PS3_DiffuseParams( ent, p );
++		break;
++	default:            /* CGEN_IDENTITY_LIGHTING, CGEN_BAD: ComputeColors memsets all four bytes */
++		k[0] = k[1] = k[2] = k[3] = tr.identityLightByte;
++		break;
++	}
++
++	for ( i = 0; i < 4; i++ ) {
++		if ( kind == K_CONST ) {
++			mul[i] = 0.0f;
++			add[i] = k[i] / 255.0f;
++		} else if ( kind == K_VERTEX ) {
++			mul[i] = i < 3 ? scale : 1.0f;  /* alpha is copied unscaled */
++			add[i] = 0.0f;
++		} else {
++			mul[i] = -scale;
++			add[i] = scale;
++		}
++	}
++
++	switch ( pStage->alphaGen ) {
++	case AGEN_SKIP:
++		/* one-minus-vertex leaves the previous stage's alpha in svars, which the VP cannot see */
++		if ( kind == K_ONE_MINUS_VERTEX ) {
++			return qfalse;
++		}
++		break;
++	case AGEN_IDENTITY:
++		/* ComputeColors keeps the vertex alpha for rgbGen vertex at identityLight 1 (and identity's 255) */
++		if ( pStage->rgbGen == CGEN_IDENTITY || ( pStage->rgbGen == CGEN_VERTEX && tr.identityLight == 1 ) ) {
++			break;
++		}
++		mul[3] = 0.0f;
++		add[3] = 1.0f;
++		break;
++	case AGEN_CONST:
++		mul[3] = 0.0f;
++		add[3] = pStage->constantColor[3] / 255.0f;
++		break;
++	case AGEN_WAVEFORM:
++		/* RB_CalcWaveAlpha: clamped, then truncated to an int */
++		if ( !PS3_WaveValue( &pStage->alphaWave, &glow ) ) {
++			return qfalse;
++		}
++		glow = glow < 0 ? 0 : ( glow > 1 ? 1 : glow );
++		v = 255 * glow;
++		mul[3] = 0.0f;
++		add[3] = v / 255.0f;
++		break;
++	case AGEN_ENTITY:
++	case AGEN_ONE_MINUS_ENTITY:
++		if ( !ent ) {
++			return qfalse;
++		}
++		v = ent->e.shaderRGBA[3];
++		if ( pStage->alphaGen == AGEN_ONE_MINUS_ENTITY ) {
++			v = 255 - v;
++		}
++		mul[3] = 0.0f;
++		add[3] = v / 255.0f;
++		break;
++	case AGEN_VERTEX:
++		mul[3] = 1.0f;
++		add[3] = 0.0f;
++		break;
++	case AGEN_ONE_MINUS_VERTEX:
++		mul[3] = -1.0f;
++		add[3] = 1.0f;
++		break;
++	case AGEN_LIGHTING_SPECULAR:
++		mul[3] = add[3] = 0.0f;
++		p->csel[1] = 1.0f;
++		VectorCopy( backEnd.or.viewOrigin, p->vorg );
++		break;
++	case AGEN_PORTAL:
++		/* the PPU path divides by portalRange */
++		if ( tess.shader->portalRange <= 0 ) {
++			return qfalse;
++		}
++		mul[3] = add[3] = 0.0f;
++		p->csel[2] = 1.0f;
++		VectorCopy( backEnd.viewParms.or.origin, p->porg );
++		p->porg[3] = 1.0f / tess.shader->portalRange;
++		break;
++	default:            /* AGEN_NORMALZFADE (Ridah's per-vertex fade) stays on the PPU */
++		return qfalse;
++	}
++
++	p->csel[3] = p->csel[0] + p->csel[1] + p->csel[2];
++	return qtrue;
++}
++
++/* (s, t) -> (s * m00 + t * m10 + tx, s * m01 + t * m11 + ty), on rows s[8], t[8] over (st, lm, xyz, 1).
++ * L, once a turb is seen, is the 2x2 that the turb offset still goes through. */
++static void PS3_TexAffine( float *s, float *t, float *L, float m00, float m10, float tx, float m01, float m11, float ty ) {
++	float ns, nt, l0, l1;
++	int k;
++
++	for ( k = 0; k < 8; k++ ) {
++		ns = s[k] * m00 + t[k] * m10;
++		nt = s[k] * m01 + t[k] * m11;
++		s[k] = ns;
++		t[k] = nt;
++	}
++	s[7] += tx;
++	t[7] += ty;
++	if ( L ) {
++		l0 = L[0];
++		l1 = L[1];
++		L[0] = m00 * l0 + m10 * L[2];
++		L[1] = m00 * l1 + m10 * L[3];
++		L[2] = m01 * l0 + m11 * L[2];
++		L[3] = m01 * l1 + m11 * L[3];
++	}
++}
++
++/* RB_CalcScrollTexCoords: the offset wraps to [0, 1) in double */
++static void PS3_TexScroll( float *s, float *t, const float speed[2] ) {
++	double ds = speed[0] * tess.shaderTime, dt = speed[1] * tess.shaderTime;
++
++	s[7] += ds - floor( ds );
++	t[7] += dt - floor( dt );
++}
++
++/* tcGen as rows, then every tcMod composed onto them in shader order; one turb per bundle */
++static qboolean PS3_BundleParams( const textureBundle_t *bundle, int b, ps3gl_vparams_t *p ) {
++	float *s = p->tm[b], *t = p->tm[b] + 8, *L = NULL, q;
++	double now;
++	int i;
++
++	switch ( bundle->tcGen ) {
++	case TCGEN_IDENTITY:
++		break;
++	case TCGEN_TEXTURE:
++		s[0] = 1.0f;
++		t[1] = 1.0f;
++		break;
++	case TCGEN_LIGHTMAP:
++		s[2] = 1.0f;
++		t[3] = 1.0f;
++		break;
++	case TCGEN_VECTOR:
++		VectorCopy( bundle->tcGenVectors[0], s + 4 );
++		VectorCopy( bundle->tcGenVectors[1], t + 4 );
++		break;
++	case TCGEN_ENVIRONMENT_MAPPED:
++		/* the VP's env coords take lm's place for this bundle */
++		s[2] = 1.0f;
++		t[3] = 1.0f;
++		p->tsel[b] = 1.0f;
++		VectorCopy( backEnd.or.viewOrigin, p->vorg );
++		break;
++	default:            /* fog, firerise env; TCGEN_BAD stops ComputeTexCoords */
++		return qfalse;
++	}
++
++	for ( i = 0; i < bundle->numTexMods; i++ ) {
++		const texModInfo_t *tmi = &bundle->texMods[i];
++
++		switch ( tmi->type ) {
++		case TMOD_NONE:
++			i = TR_MAX_TEXMODS;
++			break;
++		case TMOD_SWAP:
++			/* RB_CalcSwapTexCoords: (s, t) -> (t, 1 - s) */
++			PS3_TexAffine( s, t, L, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f );
++			break;
++		case TMOD_TURBULENT:
++			/* RB_CalcTurbulentTexCoords: func and base unused; a second turb stays on the PPU */
++			if ( L ) {
++				return qfalse;
++			}
++			L = p->turbm[b];
++			L[0] = L[3] = 1.0f;
++			p->tsel[2 + b] = 1.0f;
++			now = tmi->wave.phase + tess.shaderTime * tmi->wave.frequency;
++			p->turb[b][0] = tmi->wave.amplitude;
++			p->turb[b][1] = now - floor( now );
++			break;
++		case TMOD_ENTITY_TRANSLATE:
++			PS3_TexScroll( s, t, backEnd.currentEntity->e.shaderTexCoord );
++			break;
++		case TMOD_SCROLL:
++			PS3_TexScroll( s, t, tmi->scroll );
++			break;
++		case TMOD_SCALE:
++			PS3_TexAffine( s, t, L, tmi->scale[0], 0.0f, 0.0f, 0.0f, tmi->scale[1], 0.0f );
++			break;
++		case TMOD_STRETCH:
++			if ( !PS3_WaveValue( &tmi->wave, &q ) || q == 0 ) {
++				return qfalse;
++			}
++			q = 1.0f / q;
++			PS3_TexAffine( s, t, L, q, 0.0f, 0.5f - 0.5f * q, 0.0f, q, 0.5f - 0.5f * q );
++			break;
++		case TMOD_TRANSFORM:
++			PS3_TexAffine( s, t, L, tmi->matrix[0][0], tmi->matrix[1][0], tmi->translate[0],
++						   tmi->matrix[0][1], tmi->matrix[1][1], tmi->translate[1] );
++			break;
++		case TMOD_ROTATE: {
++			/* RB_CalcRotateTexCoords, sinTable lookup included */
++			double degs = -tmi->rotateSpeed * tess.shaderTime;
++			int64_t index = degs * ( FUNCTABLE_SIZE / 360.0f );
++			float sinValue = tr.sinTable[index & FUNCTABLE_MASK];
++			float cosValue = tr.sinTable[( index + FUNCTABLE_SIZE / 4 ) & FUNCTABLE_MASK];
++
++			PS3_TexAffine( s, t, L, cosValue, -sinValue, 0.5 - 0.5 * cosValue + 0.5 * sinValue,
++						   sinValue, cosValue, 0.5 - 0.5 * sinValue - 0.5 * cosValue );
++			break;
++		}
++		default:        /* a bad type ComputeTexCoords drops on */
++			return qfalse;
++		}
++	}
++	return qtrue;
++}
++
++/* What every q3_vp_gen draw needs from the frame: plain glDrawElements and no fading entity */
++static qboolean PS3_VProgUsable( void ) {
++	if ( !ps3gl_VProgOn() || !r_ps3_vprog->integer ) {
++		return qfalse;
++	}
++	/* R_DrawElements: 0 means 2 with glLockArraysEXT; strips go through glArrayElement */
++	if ( r_primitives->integer != 0 && r_primitives->integer != 2 ) {
++		return qfalse;
++	}
++	/* RB_IterateStagesGeneric's fade scales the svars colors after ComputeColors */
++	if ( backEnd.currentEntity && backEnd.currentEntity->e.fadeStartTime ) {
++		return qfalse;
++	}
++	return qtrue;
++}
++
++/* One stage, no side effects: the dry run for RB_PS3_SurfaceDeforms and the real one share it */
++static qboolean PS3_StageParams( const shaderStage_t *pStage, ps3gl_vparams_t *p ) {
++	Com_Memset( p, 0, sizeof( *p ) );
++	/* greyscale and fog-modulated colors are per-vertex table work: they stay on the PPU */
++	if ( r_greyscale->value || ( tess.fogNum && pStage->adjustColorsForFog != ACFF_NONE ) ) {
++		return qfalse;
++	}
++	if ( !PS3_ColorParams( pStage, p ) || !PS3_BundleParams( &pStage->bundle[0], 0, p ) ) {
++		return qfalse;
++	}
++	/* a single-texture stage's bundle 1 is TCGEN_BAD, and its TEXCOORD1 is never sampled */
++	if ( pStage->bundle[1].image[0] && !PS3_BundleParams( &pStage->bundle[1], 1, p ) ) {
++		return qfalse;
++	}
++	return qtrue;
++}
++
++static void PS3_SendParams( ps3gl_vparams_t *p ) {
++	qboolean normal = p->csel[0] || p->csel[1] || p->tsel[0] || p->tsel[1];
++
++	if ( ps3vp.deformActive ) {
++		Com_Memcpy( p->df, ps3vp.df, sizeof( p->df ) );
++		normal = normal || ps3vp.deformNormal;
++	}
++	p->color = tess.vertexColors;
++	p->st = tess.texCoords[0][0];
++	p->lm = tess.texCoords[0][1];
++	p->tc_stride = sizeof( tess.texCoords[0] );
++	p->normal = normal ? tess.normal : NULL;
++	ps3gl_VertexParams( p );
++}
++
++/* RB_IterateStagesGeneric calls this in place of ComputeColors / ComputeTexCoords */
++qboolean RB_PS3_StageParams( shaderStage_t *pStage ) {
++	ps3gl_vparams_t p;
++
++	if ( !PS3_VProgUsable() || !PS3_StageParams( pStage, &p ) ) {
++		/* the PPU deformed nothing if the VP was meant to: see RB_PS3_SurfaceDeforms */
++		return qfalse;
++	}
++	PS3_SendParams( &p );
++	return qtrue;
++}
++
++/* RB_StageIteratorVertexLitTexture calls this in place of RB_CalcDiffuseColor: it binds raw st, no tcMods */
++qboolean RB_PS3_VertexLitParams( void ) {
++	ps3gl_vparams_t p;
++
++	/* this iterator never deforms; the last generic surface's slots must not leak in */
++	ps3vp.deformActive = qfalse;
++	if ( !PS3_VProgUsable() || !backEnd.currentEntity ) {
++		return qfalse;
++	}
++	Com_Memset( &p, 0, sizeof( p ) );
++	PS3_DiffuseParams( backEnd.currentEntity, &p );
++	p.csel[3] = 1.0f;
++	p.cadd[3] = 1.0f;
++	p.tm[0][0] = 1.0f;
++	p.tm[0][9] = 1.0f;
++	PS3_SendParams( &p );
++	return qtrue;
++}
++
++/* RB_StageIteratorGeneric's call in place of RB_DeformTessGeometry. The VP deforms only if nothing on
++ * the PPU reads tess.xyz / tess.normal afterwards and every stage goes through the VP. qfalse: the
++ * caller deforms on the PPU as before. */
++qboolean RB_PS3_SurfaceDeforms( void ) {
++	const shader_t *shader = tess.shader;
++	ps3gl_vparams_t p;
++	int i, n = 0;
++
++	ps3vp.deformActive = qfalse;
++	ps3vp.deformNormal = qfalse;
++	if ( !shader->numDeforms || !PS3_VProgUsable() ) {
++		return qfalse;
++	}
++	/* dlights, the fog pass, shadows, the portal clip test, truform and the debug draws read the
++	 * deformed arrays */
++	if ( tess.dlightBits || tess.fogNum || r_shadows->integer == 2 || r_showtris->integer ||
++		 r_shownormals->integer || backEnd.viewParms.isPortal || tess.ATI_tess ) {
++		return qfalse;
++	}
++
++	Com_Memset( ps3vp.df, 0, sizeof( ps3vp.df ) );
++	for ( i = 0; i < shader->numDeforms && n < 3; i++ ) {
++		const deformStage_t *ds = &shader->deforms[i];
++		float *a = ps3vp.df[n], *b = a + 4, *c = a + 8, *m = a + 12, scale;
++		double now;
++
++		switch ( ds->deformation ) {
++		case DEFORM_NONE:
++			continue;
++		case DEFORM_WAVE:
++			if ( ds->deformationWave.frequency < 0 ) {
++				return qfalse;      /* Ridah's fire rise along the entity's up */
++			}
++			if ( ds->deformationWave.frequency == 0 ) {
++				/* RB_CalcDeformVertexes: one scale for the whole surface */
++				if ( !PS3_WaveValue( &ds->deformationWave, &scale ) ) {
++					return qfalse;
++				}
++				a[0] = scale;
++			} else {
++				if ( !PS3_WaveWeights( ds->deformationWave.func, b, c ) ) {
++					return qfalse;
++				}
++				a[0] = ds->deformationWave.base;
++				a[1] = ds->deformationWave.amplitude;
++				a[2] = ds->deformationSpread;
++				now = ds->deformationWave.phase + tess.shaderTime * ds->deformationWave.frequency;
++				b[0] = now - floor( now );
++			}
++			ps3vp.deformNormal = qtrue;
++			break;
++		case DEFORM_BULGE:
++			/* RB_CalcBulgeVertexes: sinTable over st.s * width + now, one period per 2 pi */
++			now = backEnd.refdef.time * 0.001 * ds->bulgeSpeed / ( 2 * M_PI );
++			a[1] = ds->bulgeHeight;
++			a[3] = ds->bulgeWidth / ( 2 * M_PI );
++			b[0] = now - floor( now );
++			b[1] = 1.0f;
++			ps3vp.deformNormal = qtrue;
++			break;
++		case DEFORM_MOVE:
++			if ( !PS3_WaveValue( &ds->deformationWave, &scale ) ) {
++				return qfalse;
++			}
++			VectorScale( ds->moveVector, scale, m );
++			break;
++		default:        /* normals (per-vertex noise), autosprite, text, projection shadow */
++			return qfalse;
++		}
++		c[2] = 1.0f;
++		n++;
++	}
++	if ( i < shader->numDeforms ) {
++		return qfalse;
++	}
++
++	for ( i = 0; i < MAX_SHADER_STAGES && tess.xstages[i]; i++ ) {
++		if ( !PS3_StageParams( tess.xstages[i], &p ) ) {
++			return qfalse;
++		}
++	}
++	ps3vp.deformActive = n > 0;
++	return ps3vp.deformActive;
++}
++
+diff --git a/code/renderer/tr_backend.c b/code/renderer/tr_backend.c
+index dd74860..a501b92 100644
+--- a/code/renderer/tr_backend.c
++++ b/code/renderer/tr_backend.c
+@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
+ // by RB_DrawSurfs), not the front end's, which is already on the next frame
+ #define glfogsettings   backEnd.fog
+ #define glfogNum        backEnd.fogNum
++#include "../gl/ps3gl_vprog.h"
+ #endif
+ #include "qgl.h"
+ 
+@@ -1510,6 +1511,8 @@ const void  *RB_DrawBuffer( const void *data ) {
+ 		// first command, so with r_smp it runs on the render thread
+ 		extern void PS3_RSX_BeginFrame( void );
+ 		PS3_RSX_BeginFrame();
++		// r_ps3_vprog for this whole frame: ps3gl keeps one vertex program per frame
++		ps3gl_SetVProg( r_ps3_vprog->integer );
+ 	}
+ #endif
+ 
+diff --git a/code/renderer/tr_init.c b/code/renderer/tr_init.c
+index 1c65678..8e93720 100644
+--- a/code/renderer/tr_init.c
++++ b/code/renderer/tr_init.c
+@@ -126,6 +126,7 @@ cvar_t  *r_ati_fsaa_samples;        //DAJ valids are 1, 2, 4
+ cvar_t  *r_ignoreGLErrors;
+ #ifdef __PS3__
+ cvar_t  *r_smp;
++cvar_t  *r_ps3_vprog;
+ #endif
+ cvar_t  *r_logFile;
+ 
+@@ -1286,6 +1287,9 @@ void R_Register( void ) {
+ 	// the back end on the PPU's second hardware thread; latched: applies on
+ 	// the next map load or vid_restart
+ 	r_smp = ri.Cvar_Get( "r_smp", "1", CVAR_ARCHIVE | CVAR_LATCH );
++	// 1: q3_vp_gen computes stage colors, texcoords and deforms on the RSX
++	// (tr_ps3_vprog.c); 0: the PPU does, as in 1.0. Applies from the next frame.
++	r_ps3_vprog = ri.Cvar_Get( "r_ps3_vprog", "1", CVAR_ARCHIVE );
+ #endif
+ 	r_fastsky = ri.Cvar_Get( "r_fastsky", "0", CVAR_ARCHIVE );
+ 	r_inGameVideo = ri.Cvar_Get( "r_inGameVideo", "1", CVAR_ARCHIVE );
+diff --git a/code/renderer/tr_local.h b/code/renderer/tr_local.h
+index 2c4341e..9c1e68f 100644
+--- a/code/renderer/tr_local.h
++++ b/code/renderer/tr_local.h
+@@ -1939,6 +1939,11 @@ extern backEndData_t   *backEndData;    // the second one may not be allocated
+ // r_smp: the back end runs on the PPU's second hardware thread (ps3_glimp.c)
+ extern backEndData_t   *r_smpBackEndData[2];    // backEndData is the front end's one
+ extern cvar_t  *r_smp;
++// r_ps3_vprog: stage colors / texcoords / deforms on the RSX (renderer/ps3/tr_ps3_vprog.c)
++extern cvar_t  *r_ps3_vprog;
++qboolean RB_PS3_StageParams( shaderStage_t *pStage );
++qboolean RB_PS3_VertexLitParams( void );
++qboolean RB_PS3_SurfaceDeforms( void );
+ void R_InitCommandBuffers( void );
+ void R_ShutdownCommandBuffers( void );
+ void R_SMP_VideoMap( int handle );
+diff --git a/code/renderer/tr_shade.c b/code/renderer/tr_shade.c
+index 41c7b75..2232ce6 100644
+--- a/code/renderer/tr_shade.c
++++ b/code/renderer/tr_shade.c
+@@ -1209,7 +1209,9 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input ) {
+ 		}
+ 
+ #ifdef __PS3__
+-		{
++		// r_ps3_vprog: the RSX's vertex program computes this stage's colors and
++		// texcoords (tr_ps3_vprog.c); the PPU only when it can't
++		if ( !RB_PS3_StageParams( pStage ) ) {
+ 			unsigned long long ps3t0 = PS3_ProfTick(), ps3t1;
+ 			ComputeColors( pStage );
+ 			ps3t1 = PS3_ProfTick();
+@@ -1331,7 +1333,14 @@ void RB_StageIteratorGeneric( void ) {
+ 	input = &tess;
+ 	shader = input->shader;
+ 
++#ifdef __PS3__
++	// r_ps3_vprog: the vertex program deforms, when nothing else reads tess.xyz
++	if ( !RB_PS3_SurfaceDeforms() ) {
++		RB_DeformTessGeometry();
++	}
++#else
+ 	RB_DeformTessGeometry();
++#endif
+ 
+ 	//
+ 	// log this call
+@@ -1470,6 +1479,10 @@ void RB_StageIteratorVertexLitTexture( void ) {
+ 	//
+ 	// compute colors
+ 	//
++#ifdef __PS3__
++	// r_ps3_vprog: the vertex program lights the model (tr_ps3_vprog.c)
++	if ( !RB_PS3_VertexLitParams() )
++#endif
+ 	RB_CalcDiffuseColor( ( unsigned char * ) tess.svars.colors );
+ 
+ 	//
+diff --git a/code/sys/ps3_platform.h b/code/sys/ps3_platform.h
+index f8e28d9..c8fc87c 100644
+--- a/code/sys/ps3_platform.h
++++ b/code/sys/ps3_platform.h
+@@ -138,6 +138,8 @@ typedef struct {
+     unsigned indices;       /* inline indices written to the command buffer */
+     unsigned vring_peak;    /* bytes of the ring segment used */
+     unsigned dropped;       /* draws dropped because the ring segment was full */
++    unsigned vprog_draws;   /* r_ps3_vprog: stage draws whose colors / texcoords the RSX computed */
++    unsigned vcopy_reused;  /* r_ps3_vprog: of those, the ones that reused the previous stage's copy */
+ } ps3gl_stats_t;
+ extern ps3gl_stats_t ps3gl_stats;
+ extern unsigned ps3gl_tex_bytes;    /* RSX memory held by textures */
+diff --git a/code/sys/ps3_prof.c b/code/sys/ps3_prof.c
+index d107b3c..ddaf4a4 100644
+--- a/code/sys/ps3_prof.c
++++ b/code/sys/ps3_prof.c
+@@ -35,6 +35,7 @@ static double gl_sum_draws, gl_sum_verts, gl_sum_indices;
+ static double gl_slow_draws, gl_slow_verts, gl_slow_indices;
+ static unsigned gl_worst_draws, gl_worst_verts;
+ static unsigned gl_peak_vring, gl_dropped;
++static double gl_sum_vprog, gl_sum_reused;
+ 
+ static double prof_us_per_tick;
+ 
+@@ -129,6 +130,8 @@ void PS3_ProfFrameEnd(double frame_us)
+     if (ps3gl_stats.vring_peak > gl_peak_vring)
+         gl_peak_vring = ps3gl_stats.vring_peak;
+     gl_dropped += ps3gl_stats.dropped;
++    gl_sum_vprog += ps3gl_stats.vprog_draws;
++    gl_sum_reused += ps3gl_stats.vcopy_reused;
+     prof_frames++;
+ 
+     memset(prof_cur, 0, sizeof(prof_cur));
+@@ -198,6 +201,7 @@ void PS3_ProfReset(void)
+     gl_slow_draws = gl_slow_verts = gl_slow_indices = 0;
+     gl_worst_draws = gl_worst_verts = 0;
+     gl_peak_vring = gl_dropped = 0;
++    gl_sum_vprog = gl_sum_reused = 0;
+ }
+ 
+ void PS3_ProfReport(void)
+@@ -213,6 +217,8 @@ void PS3_ProfReport(void)
+                      gl_worst_draws, gl_worst_verts, 0);
+         PS3_Logf("[prof] vertex ring peak %u KB of %u KB per frame, %u draws dropped",
+                  gl_peak_vring / 1024, PS3GL_VRING_SEGMENT_KB, gl_dropped);
++        PS3_Logf("[prof] r_ps3_vprog: %.0f stage draws per frame on the RSX, %.0f reused a copy",
++                 gl_sum_vprog / prof_frames, gl_sum_reused / prof_frames);
+         /* the cgame slot is CL_CGameRendering; the game module runs in sv */
+         PS3_ProfSyscallLine(1, prof_frames, prof_sum[PS3_PROF_CGAME]);
+         PS3_ProfSyscallLine(0, prof_frames, prof_sum[PS3_PROF_SV]);
+-- 
+2.43.0
+

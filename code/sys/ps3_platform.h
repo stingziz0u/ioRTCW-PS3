@@ -138,6 +138,8 @@ typedef struct {
     unsigned indices;       /* inline indices written to the command buffer */
     unsigned vring_peak;    /* bytes of the ring segment used */
     unsigned dropped;       /* draws dropped because the ring segment was full */
+    unsigned vprog_draws;   /* r_ps3_vprog: stage draws whose colors / texcoords the RSX computed */
+    unsigned vcopy_reused;  /* r_ps3_vprog: of those, the ones that reused the previous stage's copy */
 } ps3gl_stats_t;
 extern ps3gl_stats_t ps3gl_stats;
 extern unsigned ps3gl_tex_bytes;    /* RSX memory held by textures */

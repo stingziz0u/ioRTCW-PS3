@@ -1209,7 +1209,9 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input ) {
 		}
 
 #ifdef __PS3__
-		{
+		// r_ps3_vprog: the RSX's vertex program computes this stage's colors and
+		// texcoords (tr_ps3_vprog.c); the PPU only when it can't
+		if ( !RB_PS3_StageParams( pStage ) ) {
 			unsigned long long ps3t0 = PS3_ProfTick(), ps3t1;
 			ComputeColors( pStage );
 			ps3t1 = PS3_ProfTick();
@@ -1331,7 +1333,14 @@ void RB_StageIteratorGeneric( void ) {
 	input = &tess;
 	shader = input->shader;
 
+#ifdef __PS3__
+	// r_ps3_vprog: the vertex program deforms, when nothing else reads tess.xyz
+	if ( !RB_PS3_SurfaceDeforms() ) {
+		RB_DeformTessGeometry();
+	}
+#else
 	RB_DeformTessGeometry();
+#endif
 
 	//
 	// log this call
@@ -1470,6 +1479,10 @@ void RB_StageIteratorVertexLitTexture( void ) {
 	//
 	// compute colors
 	//
+#ifdef __PS3__
+	// r_ps3_vprog: the vertex program lights the model (tr_ps3_vprog.c)
+	if ( !RB_PS3_VertexLitParams() )
+#endif
 	RB_CalcDiffuseColor( ( unsigned char * ) tess.svars.colors );
 
 	//

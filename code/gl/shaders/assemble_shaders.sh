@@ -1,9 +1,14 @@
 #!/bin/bash
 #
-# assemble_shaders.sh -- regenerate ../ps3gl_shader_data.h without a Cg
-# compiler (NVIDIA's cgc/libCg is not available for Linux x86_64 anymore).
+# assemble_shaders.sh -- regenerate ../ps3gl_shader_data.h from NV40
+# assembly, with PSL1GHT's cgcomp only (no Cg compiler needed). The one
+# generated file, asm/q3_vp_gen.vpa, comes from Ubuntu's nvidia-cg-toolkit:
+#   cgc -profile vp40 -ifcvt none -o asm/q3_vp_gen.vpa q3_vp_gen.vcg
+# (then put back its two header comment lines).
 #
 #   asm/q3_vp.vpa          vertex program (NV40 assembly, with fog)
+#   asm/q3_vp_gen.vpa      r_ps3_vprog 1 vertex program (with fog), generated
+#                          from q3_vp_gen.vcg by cgc (see the .vcg)
 #   asm/q3_fp_*_fog.fpa    fragment programs with fog
 #   q3_fp_*.fpo            fragment programs without fog (from the .fcg)
 #
@@ -19,6 +24,7 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
 "$CGCOMP" -v -a asm/q3_vp.vpa "$OUT/q3_vp.vpo"
+"$CGCOMP" -v -a asm/q3_vp_gen.vpa "$OUT/q3_vp_gen.vpo"
 for m in coloronly modulate replace decal add blend modulate2; do
     "$CGCOMP" -f -a asm/q3_fp_${m}_fog.fpa "$OUT/q3_fp_${m}_fog.fpo"
 done
@@ -32,6 +38,7 @@ for m in modes:
     files.append((f"q3_fp_{m}.fpo", f"shader_fp_{m}_data"))
 for m in modes:
     files.append((os.path.join(out, f"q3_fp_{m}_fog.fpo"), f"shader_fp_{m}_fog_data"))
+files.append((os.path.join(out, "q3_vp_gen.vpo"), "shader_vp_gen_data"))
 lines = [
     "/* ps3gl_shader_data.h -- Auto-generated embedded shader binaries. Do not edit manually.",
     " * Regenerate with: cd shaders && ./assemble_shaders.sh */",
@@ -40,6 +47,7 @@ lines = [
     "",
     "#define PS3GL_SHADERS_AVAILABLE 1",
     "#define PS3GL_SHADERS_FOG 1",
+    "#define PS3GL_SHADERS_VPGEN 1",
     "",
 ]
 for fname, var in files:

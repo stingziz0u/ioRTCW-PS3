@@ -437,22 +437,41 @@ CL_JoystickMove
 =================
 */
 #ifdef __PS3__
-// stick axis (+/-32K, dead zone already zeroed by the pad code, which does not
-// rescale: the first value past it is ~23%) -> -1..1 with a response curve
-#define PS3_STICK_DEADZONE ( 30.0f / 128.0f )
-static float PS3_StickCurve( int axis ) {
+// The sticks' dead zone, in percent of their travel, per axis (each axis
+// on its own, so a stick pushed almost straight moves straight): the
+// menus' "Stick Dead Zone" slider. The pad code (ps3_input.c) sends the
+// raw axes in the game. 23 % was the fixed dead zone up to 1.1.
+static cvar_t *in_ps3_deadzone;
+
+// one stick axis (+/-32K) -> 0..1 past the dead zone, signed; full at 95 %
+// of the travel (the DS3 rarely gives the last few steps)
+static float PS3_StickAxis( int axis ) {
 	float v = axis / 32768.0f;
 	float m = v < 0 ? -v : v;
+	float dz = in_ps3_deadzone ? in_ps3_deadzone->value / 100.0f : 0.23f;
 
-	if ( m <= PS3_STICK_DEADZONE ) {
+	if ( dz < 0 ) {
+		dz = 0;
+	} else if ( dz > 0.5f ) {
+		dz = 0.5f;
+	}
+	if ( m <= dz ) {
 		return 0;
 	}
-	m = ( m - PS3_STICK_DEADZONE ) / ( 1.0f - PS3_STICK_DEADZONE );
+	m = ( m - dz ) / ( 0.95f - dz );
 	if ( m > 1 ) {
 		m = 1;
 	}
-	m = 0.25f * m + 0.75f * m * m;
 	return v < 0 ? -m : m;
+}
+
+// the look stick, with a response curve (fine aim near the center)
+static float PS3_StickCurve( int axis ) {
+	float m = PS3_StickAxis( axis );
+	float a = m < 0 ? -m : m;
+
+	a = 0.25f * a + 0.75f * a * a;
+	return m < 0 ? -a : a;
 }
 #endif
 
@@ -492,6 +511,15 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 		if ( m_pitch->value < 0 ) {
 			pitch = -pitch;
 		}
+
+		// Moving: analog. Up to 1.1 the axis times j_forward / j_side was
+		// already past 127 at the dead zone's edge, so each axis was off or
+		// full speed: a stick pushed a little to the side strafed at full
+		// speed (walking straight or lining up a jump went astray). Now the
+		// speed follows the stick, 127 at the edge; j_forward / j_side keep
+		// only their sign.
+		right = ( j_side->value < 0 ? -127.0f : 127.0f ) * PS3_StickAxis( cl.joystickAxis[j_side_axis->integer] );
+		forward = ( j_forward->value < 0 ? -127.0f : 127.0f ) * PS3_StickAxis( cl.joystickAxis[j_forward_axis->integer] );
 	}
 #endif
 
@@ -1296,6 +1324,8 @@ void CL_InitInput( void ) {
 	cl_lockonSpeed = Cvar_Get( "cl_lockonSpeed", "12", CVAR_ARCHIVE );
 	cl_lockonAngle = Cvar_Get( "cl_lockonAngle", "30", CVAR_ARCHIVE );
 	cl_lockonRange = Cvar_Get( "cl_lockonRange", "3000", CVAR_ARCHIVE );
+	in_ps3_deadzone = Cvar_Get( "in_ps3_deadzone", "23", CVAR_ARCHIVE );
+	Cvar_CheckRange( in_ps3_deadzone, 0, 50, qtrue );
 #endif
 	Cmd_AddCommand( "+zoom",     IN_ZoomDown );       //
 	Cmd_AddCommand( "-zoom",     IN_ZoomUp );

@@ -614,12 +614,12 @@ void PS3_Input_Frame(void)
         int ry = (int)ps3_pad_data.ANA_R_V - STICK_CENTER;
         int axis[4], engine_axis[4] = { 0, 1, 4, 3 };
 
-        if (abs(lx) < STICK_DEADZONE) lx = 0;
-        if (abs(ly) < STICK_DEADZONE) ly = 0;
-        if (abs(rx) < STICK_DEADZONE) rx = 0;
-        if (abs(ry) < STICK_DEADZONE) ry = 0;
-
         if (in_menu) {
+            /* the game gets the raw axes: its dead zone is the menus'
+             * "Stick Dead Zone" (in_ps3_deadzone, CL_JoystickMove) */
+            if (abs(rx) < STICK_DEADZONE) rx = 0;
+            if (abs(ry) < STICK_DEADZONE) ry = 0;
+
             /* the left stick navigates like the d-pad (see read_buttons);
              * the right stick is a pointer for screens that need one */
             if (rx || ry) {

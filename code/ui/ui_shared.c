@@ -6584,6 +6584,43 @@ static void Item_ApplyHacks( itemDef_t *item ) {
 	}
 #endif
 
+#ifdef __PS3__
+	// "Smooth Mouse" (m_filter, no mouse here) becomes the sticks' dead
+	// zone slider: in_ps3_deadzone, 0..50 % of the travel (CL_JoystickMove).
+	// Controls and the in-game Controls, page Misc.
+	if ( item->type == ITEM_TYPE_YESNO && item->cvar && !Q_stricmp( item->cvar, "m_filter" ) && item->typeData ) {
+		editFieldDef_t *editPtr = (editFieldDef_t *)item->typeData;
+
+		item->type = ITEM_TYPE_SLIDER;
+		item->cvar = String_Alloc( "in_ps3_deadzone" );
+		item->text = String_Alloc( ( item->text && Q_stristr( item->text, ":  " ) ) ? "Stick Dead Zone:  " : "Stick Dead Zone:" );
+		item->action = NULL;
+		editPtr->minVal = 0;
+		editPtr->maxVal = 50;
+		editPtr->defVal = 23;
+		if ( item->mouseEnter && Q_stristr( item->mouseEnter, "yesno_message" ) ) {
+			item->mouseEnter = String_Alloc( "show slider_message" );
+		}
+		if ( item->mouseExit && Q_stristr( item->mouseExit, "yesno_message" ) ) {
+			item->mouseExit = String_Alloc( "hide slider_message" );
+		}
+	}
+
+	// The port is single player only: the main menu's MULTIPLAYER (it opens
+	// multi_popmenu, which runs startMultiplayer) is hidden for good: not
+	// drawn, not reachable with the pad or the pointer, and renamed so no
+	// "show" can bring it back. CREDITS and QUIT keep their places at the
+	// right edge.
+	if ( item->action && ( Q_stristr( item->action, "multi_popmenu" ) || Q_stristr( item->action, "startMultiplayer" ) ) ) {
+		item->window.flags &= ~WINDOW_VISIBLE;
+		item->window.name = String_Alloc( "ps3_nomultiplayer" );
+		item->window.group = NULL;
+		item->action = NULL;
+		item->mouseEnter = NULL;
+		item->mouseExit = NULL;
+	}
+#endif
+
 	// Add video modes to system menu
 	if ( item->type == ITEM_TYPE_MULTI && item->cvar && !Q_stricmp( item->cvar, "r_mode" ) ) {
 		int i;

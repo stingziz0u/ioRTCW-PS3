@@ -6619,6 +6619,19 @@ static void Item_ApplyHacks( itemDef_t *item ) {
 		item->mouseEnter = NULL;
 		item->mouseExit = NULL;
 	}
+
+	// Without MULTIPLAYER, CREDITS and QUIT were left at the far right, past
+	// a hole. They go to the middle of the row's right half (the space
+	// between the emblem, which ends at x 420, and the edge: 420..640, center
+	// 530), with the left half's 14-unit gap between them. The main menu's
+	// rects as parsed (rectClient 530 / 600, y 396) pick them: the parent menu isn't set yet here.
+	if ( item->window.name && item->window.rectClient.y == 396 && item->window.rectClient.h == 14 ) {
+		if ( !Q_stricmp( item->window.name, "credits" ) && item->window.rectClient.x == 530 ) {
+			item->window.rectClient.x = 481;    // 481..533
+		} else if ( !Q_stricmp( item->window.name, "quit" ) && item->window.rectClient.x == 600 ) {
+			item->window.rectClient.x = 547;    // 547..579
+		}
+	}
 #endif
 
 	// Add video modes to system menu

@@ -350,9 +350,11 @@ static const int pad_game_key[PB_COUNT] = {
 /* Right stick pointer (menu units per frame at full tilt). */
 #define POINTER_MAX_SPEED  9.0f
 
-static padInfo  ps3_pad_info;
+static padInfo2 ps3_pad_info;
 static padData  ps3_pad_data;
-static int      ps3_active_pad_port = 0;
+static int      ps3_active_pad_port = -1;  /* -1: no pad */
+static int      ps3_pad_failures;           /* ioPadGetData errors in a row */
+static int      ps3_pad_nopad;              /* frames without a usable pad */
 static int      pad_down[PB_COUNT];      /* state as last reported to the engine */
 static int      pad_sent[PB_COUNT];      /* key sent for the press, released with it */
 static int      ps3_axis_prev[4];
@@ -484,40 +486,102 @@ void PS3_Input_Shutdown(void)
     Mouse_Shutdown();
 }
 
-/* Sticky port: keep the current one while it is connected, else take the
- * first connected one. Runs every frame: BT sleep / USB replug re-enumerate. */
-static void PS3_SelectActivePadPort(void)
+/* "At rest", not zero (zero is a stick pushed all the way): what the pad
+ * looks like while there is none, and right after one connects, before its
+ * first real poll (with len == 0 ioPadGetData leaves the old buffer). */
+static void pad_data_at_rest(void)
 {
-    int i;
+    memset(&ps3_pad_data, 0, sizeof(ps3_pad_data));
+    ps3_pad_data.button[4] = ps3_pad_data.button[5] = 128;
+    ps3_pad_data.button[6] = ps3_pad_data.button[7] = 128;
+}
 
-    if (ps3_pad_info.status[ps3_active_pad_port])
-        return;
-    for (i = 0; i < 7; i++) {
-        if (ps3_pad_info.status[i]) {
-            ps3_active_pad_port = i;
-            return;
+/* The pad library stuck (a DS3 powering off and on can leave ioPadGetData
+ * failing for good): end it and start it again. */
+static void PS3_PadReinit(const char *why)
+{
+    s32 a = ioPadEnd();
+    s32 b = ioPadInit(7);
+
+    PS3_Logf("[pad] ioPad restarted (%s): end=%d init=%d", why, (int)a, (int)b);
+    ps3_active_pad_port = -1;
+    ps3_pad_failures = 0;
+    ps3_pad_nopad = 0;
+    pad_release_all();
+    pad_data_at_rest();
+}
+
+/* Player 1 always has the game, as in the other ports (EDuke32-PS3's
+ * ps3_pad.c, from Doom64-PS3): the active port is resolved again every
+ * frame (a DS3 that powers off by itself and comes back can land on
+ * another port), with ioPadGetInfo2, whose bit 1 says that a port's
+ * assignment changed (its buffer is stale then). Keep the current port
+ * while it is connected, else take the first connected one. Returns the
+ * port, or -1. */
+static int PS3_SelectActivePadPort(void)
+{
+    int i, p = -1;
+
+    if (ioPadGetInfo2(&ps3_pad_info) < 0) {
+        if (++ps3_pad_nopad == 300)
+            PS3_PadReinit("GetInfo2 failing");
+        return -1;
+    }
+    for (i = 0; i < MAX_PORT_NUM; i++) {
+        if (ps3_pad_info.port_status[i] & 2)
+            ioPadClearBuf(i);
+    }
+    if (ps3_active_pad_port >= 0 && (ps3_pad_info.port_status[ps3_active_pad_port] & 1)) {
+        p = ps3_active_pad_port;
+    } else {
+        for (i = 0; i < MAX_PORT_NUM; i++) {
+            if (ps3_pad_info.port_status[i] & 1) {
+                p = i;
+                break;
+            }
         }
     }
+    if (p >= 0 && p != ps3_active_pad_port) {
+        /* a pad (again): nothing held, a clean buffer, pressure mode for
+         * L2/R2 on this port (it was set only for port 0, at start) */
+        PS3_Logf("[pad] active pad on port %d (was %d)", p, ps3_active_pad_port);
+        ioPadClearBuf(p);
+        ioPadSetPressMode(p, PAD_PRESS_MODE_ON);
+        pad_release_all();
+        pad_data_at_rest();
+        ps3_pad_failures = 0;
+    } else if (p < 0 && ps3_active_pad_port >= 0) {
+        ps3_log("[pad] no pad connected");
+        pad_release_all();
+        pad_data_at_rest();
+    }
+    ps3_active_pad_port = p;
+    return p;
 }
 
 void PS3_Input_Frame(void)
 {
     int cur[PB_COUNT];
-    int catchers, in_menu, b;
+    int catchers, in_menu, b, port;
 
     KB_Frame(qfalse);
     Mouse_Frame(qfalse);
 
-    ioPadGetInfo(&ps3_pad_info);
-    PS3_SelectActivePadPort();
-    if (!ps3_pad_info.status[ps3_active_pad_port]) {
-        pad_release_all();
+    port = PS3_SelectActivePadPort();
+    if (port < 0)
         return;
-    }
+    ps3_pad_nopad = 0;
+
     /* Keep going on len == 0: ps3_pad_data still holds the last values, and
      * skipping would freeze the menu cursor accumulator. */
-    if (ioPadGetData(ps3_active_pad_port, &ps3_pad_data) != 0)
+    if (ioPadGetData(port, &ps3_pad_data) != 0) {
+        if (ps3_pad_failures < 5)
+            PS3_Logf("[pad] ioPadGetData(%d) failed", port);
+        if (++ps3_pad_failures == 180)
+            PS3_PadReinit("GetData failing");
         return;
+    }
+    ps3_pad_failures = 0;
 
     read_buttons(&ps3_pad_data, cur);
 
